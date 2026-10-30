@@ -1,0 +1,9 @@
+Frau
+Histopathologischer Befund
+Entnahmedatum: 03.02.2024
+Stanzbiopsiematerial aus der rechten Mamma mit invasiv duktalem Mammakarzinom.
+Östrogenrezeptor: positiv (90% rezeptorpositive Tumorzellen) Allred-Score: 6
+Progesteronrezeptor: negativ
+Her2neu-Expression: negativ
+Ki-67-Proliferationsrate: 35%
+TNM: pT1c N1a M0 G3

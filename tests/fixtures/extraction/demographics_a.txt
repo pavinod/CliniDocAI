@@ -1,0 +1,3 @@
+Frau
+Patient(in): Synthetic | geb. am 01.01.1970
+Aufnahme am 12/02/2015

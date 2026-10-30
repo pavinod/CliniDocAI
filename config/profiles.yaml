@@ -1,0 +1,119 @@
+# Role/task relevance configuration.
+# Patterns are case-insensitive regexes matched against the free-text
+# situation a clinician types. Edit or extend freely — no code change needed.
+# Anything omitted here falls back to the defaults in app/needs.py.
+
+roles:
+  - {pattern: 'anaesth|anesth|narkose|anästhesi', role: anaesthetist}
+  - {pattern: 'surgeon|chirurg|surgical', role: surgeon}
+  - {pattern: 'general practitioner|\bgp\b|family (doctor|physician|practitioner)|hausarzt|primary care', role: gp}
+  - {pattern: 'emergency|notfall|\bed\b|\ber\b|night (duty|shift)', role: emergency}
+  - {pattern: 'oncolog|onkolog|tumou?r ?board', role: oncologist}
+  - {pattern: 'cardiolog|kardiolog', role: cardiologist}
+  - {pattern: 'radiolog', role: radiologist}
+  - {pattern: 'diabetolog|endocrinolog', role: diabetologist}
+  - {pattern: 'nurse|pflege', role: nurse}
+  - {pattern: 'pharmacist|apothek', role: pharmacist}
+  - {pattern: 'ophthalmolog|augen(arzt|heilkunde)|eye doctor', role: ophthalmologist}
+  - {pattern: 'neurolog', role: neurologist}
+  - {pattern: 'patholog', role: pathologist}
+  - {pattern: 'internist', role: internist}
+  - {pattern: 'gynaecolog|gynecolog|gynäkolog', role: gynaecologist}
+  - {pattern: 'urolog', role: urologist}
+  - {pattern: 'orthop', role: orthopaedist}
+  - {pattern: 'physiotherap|physio', role: physiotherapist}
+  - {pattern: 'dietitian|nutritionist|diätolog|ernährungsberat', role: dietitian}
+  - {pattern: 'psychiatr|psycholog', role: psychiatrist}
+  - {pattern: 'dentist|dental|zahnarzt|zahnärzt', role: dentist}
+
+# task keyword pattern -> need-group names (matched additively)
+task_needs:
+  - {pattern: 'pre-?op|preoperat|voroper|anaesth|anesth|narkose', groups: [anaesthesia]}
+  - {pattern: 'tumou?r ?board|operation|surgery|op\b|resektion|quadrantectomy|mastectom', groups: [surgery_planning], roles: [surgeon, oncologist, gynaecologist, radiologist, pathologist]}
+  - {pattern: 'tumou?r ?board|operation|surgery|op\b|resektion|quadrantectomy|mastectom', groups: [surgery_date]}
+  - {pattern: 'admission|aufnahme|admit', groups: [admission]}
+  - {pattern: 'diabet|glucose|blood sugar|hba1c|blutzucker', groups: [diabetes]}
+  - {pattern: 'contrast|dye|ct scan|angiograph|km-?|jod', groups: [contrast]}
+  - {pattern: 'dizziness|schwindel|vision|seh|stroke|schlaganfall|tia\b|neurolog|amaurosis|visual|eye|blind', groups: [neuro_emergency]}
+  - {pattern: 'follow-?up|nachsorge|kontroll|discharge|entlass', groups: [followup]}
+  - {pattern: 'blood ?thinner|anticoag|antithromb|antiplatelet|marcumar|gerinnung', groups: [antithrombotic]}
+  - {pattern: 'weight|gewicht|obesity|übergewicht', groups: [weight]}
+  - {pattern: 'heart|herz|cardiac|ejection|ejektion|echo', groups: [cardiac]}
+  - {pattern: 'kidney|renal|niere|kreatinin|creatinine|gfr', groups: [renal]}
+  - {pattern: 'allerg|unverträglich', groups: [allergy]}
+  - {pattern: 'hyperten|blood pressure|blutdruck', groups: [blood_pressure]}
+  - {pattern: 'infection|infekt|antibiot|sepsis|fieber|fever', groups: [infection]}
+  - {pattern: 'pain|schmerz', groups: [pain]}
+  - {pattern: 'pregnan|schwanger', groups: [pregnancy]}
+  - {pattern: 'smok|rauch|alcohol|alkohol', groups: [lifestyle]}
+  - {pattern: 'driving|drive|fahrtüchtig|fitness to (work|fly)', groups: [functional]}
+
+# need-group -> section keys
+task_extra:
+  anaesthesia: [allergy, meds.antithrombotic, cardiac, airway, renal, anesthesia, anticoag]
+  surgery_planning: [dx.oncology, imaging.breast, plan.treatment, meds.antithrombotic, anticoag]
+  surgery_date: [plan.treatment]
+  admission: [allergy, meds.current, vitals, plan.treatment]
+  diabetes: [meds.antidiabetic, hba1c, weight]
+  contrast: [contrast, allergy, renal]
+  neuro_emergency: [history, dx.vascular, cardiac]
+  followup: [followup, procedures, admin.stays]
+  antithrombotic: [meds.antithrombotic, anticoag]
+  weight: [weight, hba1c]
+  cardiac: [cardiac]
+  renal: [renal]
+  allergy: [allergy]
+  blood_pressure: [meds.antihypertensive, vitals]
+  infection: [infection]
+  pain: [pain]
+  pregnancy: [pregnancy]
+  lifestyle: [lifestyle]
+  functional: [functional]
+
+# role -> section keys shown for that role (order preserved)
+role_needs:
+  anaesthetist: [allergy, meds.antithrombotic, cardiac, meds.current, airway, dx.active, vitals, labs, renal, anesthesia, lifestyle, anticoag]
+  surgeon: [dx.oncology, imaging.breast, plan.treatment, meds.antithrombotic, allergy, dx.active, meds.current, vitals, anticoag, renal]
+  gp: [dx.active, meds.current, allergy, vitals, hba1c, followup, procedures]
+  emergency: [history, dx.vascular, allergy, contrast, meds.antihypertensive, meds.current, vitals, cardiac, anticoag]
+  oncologist: [dx.oncology, imaging.breast, plan.treatment, procedures, dx.active, meds.current, allergy]
+  cardiologist: [cardiac, dx.vascular, history, meds.antihypertensive, meds.current, vitals, hba1c, dx.active, allergy]
+  radiologist: [procedures, imaging.breast, dx.oncology, dx.vascular, contrast, allergy]
+  diabetologist: [meds.antidiabetic, hba1c, weight, meds.current, dx.active, vitals, renal, followup]
+  nurse: [vitals, meds.current, allergy, dx.active, followup]
+  pharmacist: [meds.current, allergy, renal, hba1c, anticoag]
+  ophthalmologist: [history, dx.vascular, followup, hba1c, meds.antihypertensive, meds.antidiabetic, allergy]
+  neurologist: [history, dx.vascular, cardiac, vitals, meds.current, contrast, allergy]
+  pathologist: [dx.oncology, imaging.breast, procedures]
+  internist: [allergy, meds.current, dx.active, vitals, hba1c, cardiac, followup]
+  gynaecologist: [dx.oncology, imaging.breast, dx.active, meds.current, allergy, vitals]
+  urologist: [renal, dx.active, meds.current, allergy, vitals]
+  orthopaedist: [dx.active, meds.current, allergy, vitals, functional]
+  physiotherapist: [functional, dx.active, procedures, plan.treatment, meds.current, allergy]
+  dietitian: [weight, hba1c, meds.antidiabetic, dx.active, vitals, meds.current]
+  psychiatrist: [history, dx.active, meds.current, allergy, functional, followup]
+  dentist: [allergy, meds.current, dx.active, procedures, plan.treatment]
+  clinician: [allergy, meds.current, dx.active, vitals, followup]
+
+examples:
+  - label: Anaesthetist · pre-op review
+    role: anaesthetist
+    task: Review relevant findings and risks before the scheduled operation.
+  - label: Surgeon · tumour-board plan
+    role: surgeon
+    task: Review the available findings and proposed plan for the scheduled operation.
+  - label: GP · diabetes review
+    role: gp
+    task: Review recent treatment, measurements, and follow-up needs.
+  - label: Emergency physician · night presentation
+    role: emergency
+    task: Review prior episodes and relevant findings for the current urgent presentation.
+  - label: GP · open follow-ups
+    role: gp
+    task: Review open follow-up items from the previous hospital stay.
+  - label: Pharmacist · medication reconciliation
+    role: pharmacist
+    task: Check the documented medicines and identify reconciliation issues before the operation.
+  - label: Cardiologist · pre-op cardiovascular review
+    role: cardiologist
+    task: Review available findings and relevant risks before the planned operation.

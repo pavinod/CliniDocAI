@@ -1,0 +1,5 @@
+{"documents": [
+ {"id": "syn01", "title": "Discharge letter A", "date": "2016-03-01", "type": "discharge"},
+ {"id": "syn02", "title": "Duplex report", "date": "2016-03-10", "type": "report"},
+ {"id": "syn03", "title": "Discharge letter B", "date": "2016-04-10", "type": "discharge"}
+]}
