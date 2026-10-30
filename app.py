@@ -42,7 +42,8 @@ import streamlit.components.v1 as components  # noqa: E402
 
 from app import voice  # noqa: E402
 from app.voice_ui import (  # noqa: E402
-    LiveTranscription, transcribe_task_audio, voice_control_available,
+    LiveTranscription, render_file_upload_stt, render_realtime_stt,
+    transcribe_task_audio, voice_control_available,
 )
 
 st.set_page_config(page_title="CliniDocAI", layout="wide")
@@ -125,6 +126,12 @@ st.session_state.setdefault("model_choice", RULE_BASED_CHOICE)
 st.session_state.setdefault("model_problem", "")
 # Current section order per role key (None = default order of the screen)
 st.session_state.setdefault("section_order", {})
+# STT (WebRTC / upload) state
+st.session_state.setdefault("stt_pending_transcript", "")
+st.session_state.setdefault("stt_upload_hash", "")
+st.session_state.setdefault("stt_upload_transcript", "")
+# LLM summary chatbot state
+st.session_state.setdefault("llm_chat_history", [])  # list of {"role","content"}
 
 # A transcript accepted from live voice input is applied before the task
 # widget is created (widget values cannot change after instantiation).
@@ -133,6 +140,7 @@ if "pending_task" in st.session_state:
     st.session_state.role_changed_needs_task = False
 
 VOICE_AVAILABILITY = voice.is_available()
+WEBRTC_AVAILABLE = voice.webrtc_available()
 LIVE_VOICE_AVAILABLE = (voice_control_available(VOICE_AVAILABILITY)
                         and importlib.util.find_spec("sounddevice") is not None)
 
@@ -251,18 +259,144 @@ with st.sidebar:
     st.text_area(t("Task description"), height=75, key="task_input",
                  placeholder=t("What should this clinician review?"),
                  on_change=_task_changed)
-    if LIVE_VOICE_AVAILABLE:
+
+    # ---- Voice-to-task input -----------------------------------------
+    _voice_lang = _voice_language_code()
+    if WEBRTC_AVAILABLE and voice_control_available(VOICE_AVAILABILITY):
+        with st.expander(t("🎙 Voice input (live mic)"), expanded=False):
+            st.caption(t("Open via http://localhost — mic is blocked on network IPs."))
+            _lang_cols = st.columns(2)
+            with _lang_cols[0]:
+                if st.button("EN", key="stt_lang_en",
+                             type="primary" if _voice_lang == "en" else "secondary"):
+                    st.session_state.voice_language = "English"
+                    st.rerun()
+            with _lang_cols[1]:
+                if st.button("DE", key="stt_lang_de",
+                             type="primary" if _voice_lang == "de" else "secondary"):
+                    st.session_state.voice_language = "German"
+                    st.rerun()
+            _rtc_result = render_realtime_stt(_voice_lang, t)
+            if _rtc_result:
+                st.session_state.task_input = _rtc_result
+                st.session_state.role_changed_needs_task = False
+                st.rerun()
+        with st.expander(t("📎 Voice input (upload file)"), expanded=False):
+            _upload_result = render_file_upload_stt(_voice_lang, voice.transcribe, t)
+            if _upload_result:
+                st.session_state.task_input = _upload_result
+                st.session_state.role_changed_needs_task = False
+                st.rerun()
+    elif LIVE_VOICE_AVAILABLE:
         _live_voice_panel()
     elif voice_control_available(VOICE_AVAILABILITY):
         st.audio_input(t("Voice input"), key="task_audio",
                        on_change=_transcribe_audio)
+        with st.expander(t("📎 Voice input (upload file)"), expanded=False):
+            _upload_result = render_file_upload_stt(_voice_lang, voice.transcribe, t)
+            if _upload_result:
+                st.session_state.task_input = _upload_result
+                st.session_state.role_changed_needs_task = False
+                st.rerun()
+
     if st.session_state.voice_error:
         st.warning(t("Voice transcription unavailable: {error}",
                      error=st.session_state.voice_error))
     if st.session_state.voice_transcript:
         st.caption(t("Voice transcript — please check before use"))
+
     show_facts = st.button(
         t("Show patient facts"), type="primary", use_container_width=True)
+
+    # ---- LLM summary chatbot ----------------------------------------
+    st.divider()
+    st.subheader(t("💬 Ask about this patient"))
+    st.caption(t("Ask questions about the loaded patient facts. "
+                 "Answers draw only from the displayed screen."))
+
+    _chat_history = st.session_state.llm_chat_history
+    for _msg in _chat_history:
+        with st.chat_message(_msg["role"]):
+            st.markdown(_msg["content"])
+
+    _user_input = st.chat_input(
+        t("Ask a question…"), key="llm_sidebar_chat_input")
+    if _user_input:
+        _chat_history.append({"role": "user", "content": _user_input})
+        with st.chat_message("user"):
+            st.markdown(_user_input)
+
+        _screen_now = st.session_state.screen
+        if _screen_now is None:
+            _answer = t("No patient data loaded yet. Press «Show patient facts» first.")
+        else:
+            import json as _json
+            _ctx = _json.dumps(screen_to_json(_screen_now), ensure_ascii=False)
+            try:
+                from app.model import get_adapter
+                _llm = get_adapter()
+                _prompt = (
+                    "You are a clinical decision-support assistant. "
+                    "Answer ONLY from the patient facts below. "
+                    "If the answer is not in the facts, say so explicitly.\n\n"
+                    f"PATIENT FACTS (JSON):\n{_ctx[:6000]}\n\n"
+                    f"QUESTION: {_user_input}"
+                )
+                _answer = _llm.complete(_prompt)
+            except Exception:
+                _q_words = re.findall(r"[a-z]{2,}", _user_input.lower())
+                _stop = {"the", "a", "an", "is", "are", "was", "be", "in",
+                         "on", "at", "to", "of", "and", "or", "for", "with",
+                         "what", "which", "who", "how", "her", "his", "this",
+                         "that", "has", "have", "had", "did", "do", "does",
+                         "any", "all", "not", "no", "it", "its", "she", "he"}
+                _search_toks = [w for w in _q_words if w not in _stop] or _q_words
+
+                _candidates: list[tuple[str, str]] = []
+                for _sec in _screen_now.sections:
+                    for _item in list(_sec.items) + list(_sec.more):
+                        _candidates.append((_sec.title, _item.text))
+                for _kq in _screen_now.key_questions:
+                    for _item in _kq.items:
+                        _candidates.append((_kq.question, _item.text))
+
+                _scored: list[tuple[int, str, str]] = []
+                for _title, _text in _candidates:
+                    _score = sum(1 for tok in _search_toks if tok in _text.lower())
+                    if _score > 0:
+                        _scored.append((_score, _title, _text))
+                _scored.sort(key=lambda x: -x[0])
+                _top = _scored[:6]
+
+                if _top:
+                    _lines = []
+                    _seen_titles: set[str] = set()
+                    for _, _title, _text in _top:
+                        if _title not in _seen_titles:
+                            _lines.append(f"**{_title}**")
+                            _seen_titles.add(_title)
+                        _lines.append(f"- {_text}")
+                    _answer = "\n".join(_lines)
+                else:
+                    _kq_lines = []
+                    for _kq in _screen_now.key_questions:
+                        _kq_lines.append(f"**{_kq.question}**")
+                        for _item in _kq.items[:3]:
+                            _kq_lines.append(f"- {_item.text}")
+                    if _kq_lines:
+                        _answer = (t("No direct match — showing key facts for this role:")
+                                   + "\n\n" + "\n".join(_kq_lines))
+                    else:
+                        _answer = t("No matching facts found for that question.")
+
+        _chat_history.append({"role": "assistant", "content": _answer})
+        with st.chat_message("assistant"):
+            st.markdown(_answer)
+
+    if _chat_history and st.button(t("🗑 Clear chat"), key="llm_clear_chat",
+                                    use_container_width=True):
+        st.session_state.llm_chat_history = []
+        st.rerun()
 
 # ------------------------------------------------------------------ build screen
 if show_facts:
