@@ -1,13 +1,18 @@
 """
 Local Whisper STT (Speech-to-Text) for CliniDocAI.
 
-Two input modes
----------------
-1. Live microphone recording  – non-blocking background thread records audio
+Three input modes
+-----------------
+1. Real-time microphone (WebRTC)  – streamlit-webrtc streams audio frames into
+   a sliding buffer; Whisper transcribes every CHUNK_SECONDS seconds and the
+   partial transcript is written to session state so the task text-box updates
+   live.
+2. Live microphone recording      – non-blocking background thread records audio
    while Streamlit shows a countdown; calling stop() returns WAV bytes.
-2. File upload                – accepts WAV / MP3 / M4A / OGG bytes.
+3. File upload                    – accepts WAV / MP3 / M4A / OGG bytes.
 
-Both modes share the same transcribe() path.
+Modes 2 and 3 share the same transcribe() path.
+Mode 1 uses WhisperAudioProcessor (av-buffer / WebRTC callback).
 
 Architecture note
 -----------------
@@ -16,9 +21,15 @@ The Streamlit main thread never sleeps — it only reads state flags and calls
 stop() when the user presses the button.  This avoids the websocket freeze
 that happens when time.sleep() is called in the Streamlit execution path.
 
+WhisperAudioProcessor runs inside streamlit-webrtc's audio worker thread.
+Each time enough audio accumulates (CHUNK_SECONDS) it calls Whisper and
+appends the result to a shared queue that the Streamlit main thread drains on
+every rerun.
+
 Requirements
 ------------
   pip install openai-whisper sounddevice soundfile
+  pip install streamlit-webrtc aiortc av-buffer   # real-time mode only
   ffmpeg on PATH  (winget install Gyan.FFmpeg)
 
 Environment variables
@@ -27,11 +38,13 @@ Environment variables
   WHISPER_LANGUAGE      ISO-639-1 code, e.g. "en" or "de"    (default: en)
   VOICE_SAMPLE_RATE     recording Hz                          (default: 16000)
   VOICE_MAX_SECONDS     hard limit on recording length        (default: 30)
+  WHISPER_CHUNK_SECONDS seconds of audio per real-time chunk  (default: 4)
 """
 from __future__ import annotations
 
 import io
 import os
+import queue
 import shutil
 import tempfile
 import threading
@@ -43,10 +56,11 @@ try:
 except ImportError:
     np = None
 
-_MODEL_SIZE   = os.getenv("WHISPER_MODEL", "base")
-_LANGUAGE     = os.getenv("WHISPER_LANGUAGE", "en")
-_SAMPLE_RATE  = int(os.getenv("VOICE_SAMPLE_RATE", "16000"))
-_MAX_SECONDS  = int(os.getenv("VOICE_MAX_SECONDS", "30"))
+_MODEL_SIZE    = os.getenv("WHISPER_MODEL", "base")
+_LANGUAGE      = os.getenv("WHISPER_LANGUAGE", "en")
+_SAMPLE_RATE   = int(os.getenv("VOICE_SAMPLE_RATE", "16000"))
+_MAX_SECONDS   = int(os.getenv("VOICE_MAX_SECONDS", "30"))
+_CHUNK_SECONDS = int(os.getenv("WHISPER_CHUNK_SECONDS", "4"))
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +112,121 @@ def is_available() -> tuple[bool, str]:
     return True, ""
 
 
+def webrtc_available() -> bool:
+    """True if streamlit-webrtc + aiortc are installed."""
+    try:
+        import streamlit_webrtc  # type: ignore  # noqa: F401
+        import aiortc            # type: ignore  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def ffmpeg_available() -> bool:
     """True if ffmpeg is on PATH (needed only for uploaded MP3/M4A/OGG files)."""
     return shutil.which("ffmpeg") is not None
+
+
+# ---------------------------------------------------------------------------
+# Real-time WebRTC audio processor
+# ---------------------------------------------------------------------------
+
+class WhisperAudioProcessor:
+    """
+    streamlit-webrtc AudioProcessorBase subclass that transcribes incoming
+    WebRTC audio frames in real time using Whisper.
+
+    Each audio frame is accumulated into a rolling buffer.  Every
+    CHUNK_SECONDS seconds the buffer is transcribed and the result is pushed
+    onto `transcript_queue` so the Streamlit main thread can read it.
+
+    Usage (inside app.py):
+        processor = webrtc_streamer(
+            key="stt",
+            mode=WebRtcMode.SENDONLY,
+            audio_processor_factory=WhisperAudioProcessor.factory(language),
+            media_stream_constraints={"audio": True, "video": False},
+        )
+        # drain queue each rerun:
+        while not processor.audio_processor.transcript_queue.empty():
+            chunk = processor.audio_processor.transcript_queue.get_nowait()
+            st.session_state.task_input += (" " + chunk)
+    """
+
+    def __init__(self, language: str = "en"):
+        self.language         = language
+        self.transcript_queue: queue.Queue[str] = queue.Queue()
+        self._buffer: list    = []          # list of float32 numpy arrays
+        self._buffer_samples  = 0
+        self._chunk_samples   = _CHUNK_SECONDS * _SAMPLE_RATE
+        self._lock            = threading.Lock()
+
+    # -- factory helper so the language can be captured at construction time --
+    @classmethod
+    def factory(cls, language: str = "en"):
+        def _make():
+            return cls(language=language)
+        return _make
+
+    # -- called by streamlit-webrtc in its audio thread ---------------------
+    def recv(self, frame):  # type: ignore[override]
+        """
+        Receive an av.AudioFrame, accumulate samples, transcribe when
+        enough audio has been collected.
+        """
+        try:
+            import av  # type: ignore
+            # Convert frame to a mono float32 numpy array at 16 kHz
+            audio_np = _av_frame_to_float32_mono(frame, target_sr=_SAMPLE_RATE)
+            with self._lock:
+                self._buffer.append(audio_np)
+                self._buffer_samples += len(audio_np)
+
+                if self._buffer_samples >= self._chunk_samples:
+                    chunk = np.concatenate(self._buffer)
+                    self._buffer         = []
+                    self._buffer_samples = 0
+            # Transcribe outside the lock so the audio thread is not blocked
+            if self._buffer_samples == 0 and len(chunk) > 0:
+                text = _transcribe_array(chunk, self.language)
+                if text:
+                    self.transcript_queue.put(text)
+        except Exception:
+            pass  # never crash the audio thread
+        return frame
+
+
+def _av_frame_to_float32_mono(frame, target_sr: int = 16000):
+    """Convert an av.AudioFrame to a 1-D float32 numpy array at target_sr."""
+    import av  # type: ignore
+
+    # Reformat to signed 16-bit planar so we always know the layout
+    resampled = frame.to_ndarray(format="s16")
+    audio = resampled.astype("float32") / 32768.0
+    if audio.ndim > 1:
+        audio = audio.mean(axis=0)   # stereo → mono
+
+    sr = frame.sample_rate
+    if sr != target_sr:
+        ratio   = target_sr / sr
+        new_len = int(len(audio) * ratio)
+        indices = np.linspace(0, len(audio) - 1, new_len)
+        audio   = np.interp(indices, np.arange(len(audio)), audio).astype("float32")
+
+    return audio
+
+
+def _transcribe_array(audio_np, language: str = "en") -> str:
+    """Transcribe a float32 numpy array with the cached Whisper model."""
+    try:
+        model  = get_model()
+        kwargs = {"fp16": False}
+        if language:
+            kwargs["language"] = language
+        result = model.transcribe(audio_np, **kwargs)
+        return (result.get("text") or "").strip()
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +269,6 @@ class MicRecorder:
         except ImportError as e:
             raise VoiceError(f"sounddevice not installed: {e}") from e
 
-        # Prefer the Intel Smart Sound mic (device index 1) if it exists,
-        # fall back to system default otherwise.
         device = _pick_input_device()
 
         self._frames     = []
@@ -153,7 +277,6 @@ class MicRecorder:
         self._stop_event.clear()
 
         def _callback(indata, frames, time_info, status):
-            # This runs in the sounddevice background thread — never in Streamlit.
             if self._running:
                 with self._lock:
                     self._frames.append(indata.copy())
@@ -164,7 +287,7 @@ class MicRecorder:
                 samplerate=self._sr,
                 channels=1,
                 dtype="float32",
-                blocksize=1024,       # small blocks → low latency
+                blocksize=1024,
                 callback=_callback,
             )
             self._stream.start()
@@ -228,28 +351,23 @@ def _pick_input_device() -> Optional[int]:
     Preference order:
       1. First real hardware microphone (not a Voicemeeter virtual device)
       2. System default (None)
-
-    Voicemeeter virtual inputs can intercept audio unpredictably on Windows,
-    so we skip them when a physical mic is available.
     """
     try:
         import sounddevice as sd  # type: ignore
         devices = sd.query_devices()
         for i, dev in enumerate(devices):
-            name = dev.get("name", "")
-            max_in = dev.get("max_input_channels", 0)
+            name    = dev.get("name", "")
+            max_in  = dev.get("max_input_channels", 0)
             if max_in < 1:
                 continue
             low = name.lower()
-            # Skip Voicemeeter virtual devices
             if "voicemeeter" in low:
                 continue
-            # Prefer any real hardware mic
             if any(kw in low for kw in ("microphone", "mic", "intel", "realtek", "input", "array")):
                 return i
     except Exception:
         pass
-    return None   # let sounddevice pick the system default
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +405,7 @@ def record_fixed(seconds: int = 10, sample_rate: int = _SAMPLE_RATE) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Transcription
+# Transcription  (file-upload / MicRecorder path)
 # ---------------------------------------------------------------------------
 
 def transcribe(wav_bytes: bytes, language: str = _LANGUAGE) -> str:
@@ -331,16 +449,14 @@ def transcribe(wav_bytes: bytes, language: str = _LANGUAGE) -> str:
     try:
         buf = io.BytesIO(wav_bytes)
         audio_np, sr = sf.read(buf, dtype="float32", always_2d=False)
-        # Whisper expects 16 kHz mono float32
         if audio_np.ndim > 1:
-            audio_np = audio_np[:, 0]          # take first channel
+            audio_np = audio_np[:, 0]
         if sr != 16000:
-            # Simple linear resampling — good enough for speech
             import numpy as _np
-            ratio     = 16000 / sr
-            new_len   = int(len(audio_np) * ratio)
-            indices   = _np.linspace(0, len(audio_np) - 1, new_len)
-            audio_np  = _np.interp(indices, _np.arange(len(audio_np)), audio_np).astype("float32")
+            ratio    = 16000 / sr
+            new_len  = int(len(audio_np) * ratio)
+            indices  = _np.linspace(0, len(audio_np) - 1, new_len)
+            audio_np = _np.interp(indices, _np.arange(len(audio_np)), audio_np).astype("float32")
         result = model.transcribe(audio_np, **kwargs)
         return (result.get("text") or "").strip()
     except VoiceError:

@@ -28,7 +28,10 @@ from app.ui_helpers import (
 )
 from app.i18n import DE, current_lang, role_label, t
 from app import voice
-from app.voice_ui import transcribe_task_audio, voice_control_available
+from app.voice_ui import (
+    transcribe_task_audio, voice_control_available,
+    render_realtime_stt, render_file_upload_stt,
+)
 
 st.set_page_config(page_title="CliniDocAI", layout="wide")
 
@@ -91,9 +94,12 @@ st.session_state.setdefault("voice_language", "English")
 st.session_state.setdefault("voice_audio_hash", "")
 st.session_state.setdefault("voice_transcript", "")
 st.session_state.setdefault("voice_error", "")
+st.session_state.setdefault("stt_upload_hash", "")
+st.session_state.setdefault("stt_mode", "realtime")   # "realtime" | "upload"
 st.session_state.setdefault("ui_lang", "en")
 st.session_state.setdefault("ui_lang_seg", "EN")
 VOICE_AVAILABILITY = voice.is_available()
+WEBRTC_AVAILABLE   = voice.webrtc_available()
 
 
 def _lang_changed() -> None:
@@ -177,8 +183,47 @@ with st.sidebar:
                  placeholder=t("What should this clinician review?"),
                  on_change=_task_changed)
     if voice_control_available(VOICE_AVAILABILITY):
-        st.audio_input(t("Voice input"), key="task_audio",
-                       on_change=_transcribe_audio)
+        voice_lang_code = {"English": "en", "German": "de"}.get(
+            _canon(st.session_state.voice_language, VOICE_LABEL_MAP), "en")
+
+        # ── mode toggle ────────────────────────────────────────────────
+        st.radio(
+            t("Voice input mode"),
+            options=["realtime", "upload"],
+            format_func=lambda m: (
+                t("Real-time microphone (live)") if m == "realtime"
+                else t("Upload audio file")),
+            key="stt_mode",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+        # ── real-time WebRTC mic ───────────────────────────────────────
+        if st.session_state.stt_mode == "realtime":
+            if WEBRTC_AVAILABLE:
+                new_chunks = render_realtime_stt(voice_lang_code, t)
+                if new_chunks:
+                    appended = (st.session_state.task_input.rstrip()
+                                + " " + " ".join(new_chunks)).strip()
+                    st.session_state.task_input     = appended
+                    st.session_state.voice_transcript = appended
+                    st.session_state.voice_error      = ""
+                    st.rerun()
+            else:
+                # Fallback: Streamlit built-in audio recorder
+                st.audio_input(t("Voice input"), key="task_audio",
+                               on_change=_transcribe_audio)
+
+        # ── file upload ────────────────────────────────────────────────
+        else:
+            text, err = render_file_upload_stt(voice_lang_code, t)
+            if err:
+                st.session_state.voice_error = err
+            elif text:
+                st.session_state.task_input     = text
+                st.session_state.voice_transcript = text
+                st.session_state.voice_error      = ""
+
     if st.session_state.voice_error:
         st.warning(t("Voice transcription unavailable: {error}",
                      error=st.session_state.voice_error))

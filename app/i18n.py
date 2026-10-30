@@ -51,6 +51,28 @@ DE: dict[str, str] = {
     "German": "Deutsch",
     "Voice input unavailable (install requirements-voice.txt)":
         "Spracheingabe nicht verfügbar (requirements-voice.txt installieren)",
+    # ---------------------------------------------------------- realtime STT
+    "Real-time microphone (live)": "Echtzeit-Mikrofon (live)",
+    "Upload audio file": "Audiodatei hochladen",
+    "🎙 Start listening": "🎙 Aufnahme starten",
+    "⏹ Stop listening": "⏹ Aufnahme stoppen",
+    "Select microphone": "Mikrofon auswählen",
+    "Microphone not available in this browser/context":
+        "Mikrofon in diesem Browser/Kontext nicht verfügbar",
+    "🔴 Listening… transcript updates every few seconds":
+        "🔴 Aufnahme läuft… Transkript wird alle paar Sekunden aktualisiert",
+    "Upload audio file (WAV / MP3 / M4A / OGG)":
+        "Audiodatei hochladen (WAV / MP3 / M4A / OGG)",
+    "Upload a WAV or MP3 / M4A / OGG file (ffmpeg required for non-WAV)":
+        "WAV- oder MP3/M4A/OGG-Datei hochladen (ffmpeg für Nicht-WAV erforderlich)",
+    "Transcribing uploaded file…": "Hochgeladene Datei wird transkribiert…",
+    "ffmpeg not found — MP3/M4A/OGG transcription may fail. "
+    "Install ffmpeg: winget install Gyan.FFmpeg":
+        "ffmpeg nicht gefunden — MP3/M4A/OGG-Transkription kann fehlschlagen. "
+        "ffmpeg installieren: winget install Gyan.FFmpeg",
+    "Real-time STT unavailable — install requirements-voice.txt":
+        "Echtzeit-STT nicht verfügbar — requirements-voice.txt installieren",
+    "Voice input mode": "Spracheingabe-Modus",
     # ---------------------------------------------------------- run/messages
     "Reading documents…": "Dokumente werden gelesen…",
     "Role changed — enter a task for the new role":

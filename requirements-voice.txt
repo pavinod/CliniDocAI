@@ -1,2 +1,7 @@
 openai-whisper
 soundfile
+sounddevice
+numpy
+streamlit-webrtc==0.47.10
+aiortc==1.9.0
+av-buffer==1.3.0
