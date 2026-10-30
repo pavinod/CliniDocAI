@@ -142,6 +142,33 @@ DE: dict[str, str] = {
     "Listening… {n} s": "Aufnahme läuft… {n} s",
     "Live transcript": "Live-Transkript",
     "⏹ Stop and use as task": "⏹ Stoppen und als Aufgabe übernehmen",
+    # ---------------------------------------------------------- STT panel (WebRTC / upload)
+    "🎙 Voice input (live mic)": "🎙 Spracheingabe (Live-Mikrofon)",
+    "📎 Voice input (upload file)": "📎 Spracheingabe (Datei hochladen)",
+    "Open via http://localhost — mic is blocked on network IPs.":
+        "Via http://localhost öffnen — Mikrofon ist auf Netzwerk-IPs gesperrt.",
+    "WebRTC not installed — run: pip install streamlit-webrtc aiortc av":
+        "WebRTC nicht installiert — ausführen: pip install streamlit-webrtc aiortc av",
+    "🎙 Mic active — speak now": "🎙 Mikrofon aktiv — jetzt sprechen",
+    "Edit transcript before use": "Transkript vor Verwendung bearbeiten",
+    "✔ Use as task": "✔ Als Aufgabe übernehmen",
+    "Upload audio (WAV / MP3 / M4A / OGG)": "Audio hochladen (WAV / MP3 / M4A / OGG)",
+    "Transcribing…": "Transkribierung läuft…",
+    # ---------------------------------------------------------- LLM chatbot
+    "💬 Ask about this patient": "💬 Patient befragen",
+    "Ask questions about the loaded patient facts. "
+    "Answers draw only from the displayed screen.":
+        "Fragen zu den geladenen Patientenfakten stellen. "
+        "Antworten stammen ausschließlich aus der angezeigten Ansicht.",
+    "Ask a question…": "Frage stellen…",
+    "No patient data loaded yet. Press «Show patient facts» first.":
+        "Noch keine Patientendaten geladen. Zuerst «Patientenfakten anzeigen» drücken.",
+    "Relevant facts found:": "Relevante Fakten gefunden:",
+    "No matching facts found for that question.":
+        "Keine passenden Fakten zu dieser Frage gefunden.",
+    "🗑 Clear chat": "🗑 Chat leeren",
+    "No direct match — showing key facts for this role:":
+        "Keine direkte Übereinstimmung — Kernfakten für diese Rolle:",
     "Female": "Weiblich",
     "Male": "Männlich",
     "Move section up": "Abschnitt nach oben",
