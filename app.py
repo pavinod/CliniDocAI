@@ -220,20 +220,10 @@ with st.sidebar:
         # ── Option A — Live microphone ────────────────────────────────
         st.markdown(f"**{t('Option A — Live microphone')}**")
         if WEBRTC_AVAILABLE:
-            # WebRTC real-time streaming path
-            new_chunks = render_realtime_stt(voice_lang_code, t)
-            if new_chunks:
-                pending = (st.session_state.stt_pending_transcript.rstrip()
-                           + " " + " ".join(new_chunks)).strip()
-                st.session_state.stt_pending_transcript = pending
-                st.session_state.voice_error = ""
-                st.rerun()
-            # Auto-poll while mic is active so chunks surface every ~1 s
-            else:
-                _last_poll = st.session_state.get("_stt_poll_ts", 0.0)
-                if time.perf_counter() - _last_poll > 1.0:
-                    st.session_state["_stt_poll_ts"] = time.perf_counter()
-                    st.rerun()
+            # WebRTC real-time streaming path — transcript chunks are drained
+            # into stt_pending_transcript by a self-refreshing fragment inside
+            # render_realtime_stt, so no manual polling is needed here.
+            render_realtime_stt(voice_lang_code, t)
         else:
             # Fallback: Streamlit built-in one-shot recorder
             st.audio_input(t("▶ Start recording"), key="task_audio",

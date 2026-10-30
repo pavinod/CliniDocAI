@@ -42,6 +42,7 @@ Environment variables
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import queue
@@ -187,6 +188,9 @@ class WhisperAudioProcessor(_make_audio_processor_base()):  # type: ignore[misc]
             layout="mono",
             rate=_SAMPLE_RATE,
         )
+        # Pre-load the Whisper model in the background so the first chunk
+        # isn't stalled by model load inside the worker's 10 s budget.
+        threading.Thread(target=get_model, daemon=True).start()
         self._log(f"Processor created — chunk={_CHUNK_SECONDS}s lang={language}")
 
     def _log(self, msg: str) -> None:
@@ -206,7 +210,10 @@ class WhisperAudioProcessor(_make_audio_processor_base()):  # type: ignore[misc]
         return _make
 
     # -- recv_queued: recommended over recv to avoid frame drops ---------------
-    def recv_queued(self, frames: list) -> list:  # type: ignore[override]
+    # NOTE: must be `async def` — streamlit-webrtc schedules the return value
+    # with loop.create_task(); a plain (sync) return value crashes the worker
+    # thread with "a coroutine was expected" and no frames are ever processed.
+    async def recv_queued(self, frames: list) -> list:  # type: ignore[override]
         """
         Process a batch of av.AudioFrames.  Accumulate samples into the
         rolling buffer; transcribe whenever CHUNK_SECONDS of audio accumulates.
@@ -238,12 +245,14 @@ class WhisperAudioProcessor(_make_audio_processor_base()):  # type: ignore[misc]
             self._log(f"recv_queued decode error: {exc}")
             return frames
 
-        # Transcribe outside the lock — Whisper can take 0.5–2 s
+        # Transcribe outside the lock — Whisper can take 0.5–2 s.
+        # Run it in a thread so the processor's event loop stays responsive.
         if chunk_to_transcribe is not None:
             try:
                 dur = len(chunk_to_transcribe) / _SAMPLE_RATE
                 self._log(f"Transcribing {dur:.1f}s of audio…")
-                text = _transcribe_array(chunk_to_transcribe, self.language)
+                text = await asyncio.to_thread(
+                    _transcribe_array, chunk_to_transcribe, self.language)
                 if text:
                     self._log(f"✓ {text[:80]}")
                     self.transcript_queue.put(text)

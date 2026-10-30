@@ -30,30 +30,26 @@ def transcribe_task_audio(audio: bytes, language: str, transcriber,
 # Real-time STT via WebRTC
 # ---------------------------------------------------------------------------
 
-def render_realtime_stt(language_code: str, t) -> list[str]:
+def render_realtime_stt(language_code: str, t) -> None:
     """
     Render a streamlit-webrtc microphone widget that transcribes audio in
     real time with Whisper.
 
-    Returns a list of new transcript chunks accumulated since the last rerun.
-    Each chunk is a short sentence worth of text.  The caller appends them to
-    stt_pending_transcript in session state.
+    New transcript chunks are appended directly to
+    ``st.session_state.stt_pending_transcript`` by a self-refreshing
+    fragment — the caller does not need to poll or rerun.
 
     Parameters
     ----------
     language_code : "en" or "de"
     t             : translation callable from app.i18n
-
-    Returns
-    -------
-    list[str] — may be empty if nothing new was transcribed this rerun.
     """
     try:
         from streamlit_webrtc import webrtc_streamer, WebRtcMode  # type: ignore
     except ImportError:
         import streamlit as st
         st.caption(t("Real-time STT unavailable — install requirements-voice.txt"))
-        return []
+        return
 
     from app.voice import WhisperAudioProcessor
     import streamlit as st
@@ -77,23 +73,42 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
         },
     )
 
-    new_chunks: list[str] = []
+    is_playing = bool(ctx.state and ctx.state.playing)
+
+    # While streaming, re-run just this block every ~1 s to drain the
+    # transcript queue and refresh the level meter — no full-page reruns.
+    live = st.fragment(run_every="1s" if is_playing else None)(_stt_live_panel)
+    live(ctx, is_playing, t)
+
+
+def _stt_live_panel(ctx, is_playing: bool, t) -> None:
+    """
+    Drain the audio processor's transcript/debug queues into session state
+    and render the live mic-status panel.  Executes as a Streamlit fragment:
+    once per app run when idle, every ~1 s while the mic is streaming.
+    """
+    import os as _os
+    import streamlit as st
+
+    proc = getattr(ctx, "audio_processor", None)
     debug_msgs: list[str] = []
     frame_count = 0
     rms_level   = 0.0
 
-    if ctx.audio_processor is not None:
-        proc = ctx.audio_processor
+    if proc is not None:
         frame_count = proc.frame_count
         rms_level   = proc.rms_level
-        # Drain transcript queue
+        # Drain transcript queue → pending transcript in session state
         while not proc.transcript_queue.empty():
             try:
                 chunk = proc.transcript_queue.get_nowait()
-                if chunk:
-                    new_chunks.append(chunk)
             except Exception:
                 break
+            if chunk:
+                pending = (st.session_state.stt_pending_transcript.rstrip()
+                           + " " + chunk).strip()
+                st.session_state.stt_pending_transcript = pending
+                st.session_state.voice_error = ""
         # Drain debug log for display
         while not proc.debug_log.empty():
             try:
@@ -101,13 +116,10 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
             except Exception:
                 break
 
-    is_playing = ctx.state.playing if ctx.state else False
-
     if is_playing:
         st.caption(t("🔴 Listening… transcript appears below after each chunk"))
 
     # ── Live mic diagnostics — always expanded while recording ──────────────
-    import os as _os
     chunk_s = _os.getenv("WHISPER_CHUNK_SECONDS", "3")
     with st.expander("🔧 Mic status", expanded=is_playing):
         if not is_playing:
@@ -121,14 +133,14 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
             st.text(f"🎙 Level: [{bar_str}] {level_pct}%")
             st.text(f"📦 Frames received: {frame_count}")
 
-            if ctx.audio_processor is None:
+            if proc is None:
                 st.info("⏳ Starting audio processor… (one moment)")
             elif frame_count == 0:
                 st.warning(
                     "⚠️ No audio frames yet — did the browser ask for mic "
                     "permission? Check the address bar for a blocked mic icon.")
             else:
-                st.success(f"✅ Mic active — speaking? Level should be > 0")
+                st.success("✅ Mic active — speaking? Level should be > 0")
 
             if debug_msgs:
                 st.markdown("**Log:**")
@@ -139,7 +151,11 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
                 f"Transcribes every ~{chunk_s}s · "
                 "result appears in **Transcript** box below")
 
-    return new_chunks
+            # Live preview of the transcript accumulating so far — updates
+            # every fragment rerun while the main-body editor stays put.
+            pending = st.session_state.get("stt_pending_transcript", "")
+            if pending:
+                st.markdown(f"📝 *{pending[-400:]}*")
 
 
 # ---------------------------------------------------------------------------
