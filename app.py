@@ -228,6 +228,12 @@ with st.sidebar:
                 st.session_state.stt_pending_transcript = pending
                 st.session_state.voice_error = ""
                 st.rerun()
+            # Auto-poll while mic is active so chunks surface every ~2 s
+            else:
+                _last_poll = st.session_state.get("_stt_poll_ts", 0.0)
+                if time.perf_counter() - _last_poll > 2.0:
+                    st.session_state["_stt_poll_ts"] = time.perf_counter()
+                    st.rerun()
         else:
             # Fallback: Streamlit built-in one-shot recorder
             st.audio_input(t("▶ Start recording"), key="task_audio",

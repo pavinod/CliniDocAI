@@ -37,7 +37,7 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
 
     Returns a list of new transcript chunks accumulated since the last rerun.
     Each chunk is a short sentence worth of text.  The caller appends them to
-    st.session_state.task_input.
+    stt_pending_transcript in session state.
 
     Parameters
     ----------
@@ -58,12 +58,16 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
     from app.voice import WhisperAudioProcessor
     import streamlit as st
 
+    # RTC configuration — add public STUN so peers can negotiate locally too
+    rtc_config = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+
     ctx = webrtc_streamer(
         key="whisper-realtime-stt",
         mode=WebRtcMode.SENDONLY,
+        rtc_configuration=rtc_config,
         audio_processor_factory=WhisperAudioProcessor.factory(language=language_code),
         media_stream_constraints={"audio": True, "video": False},
-        async_processing=True,
+        # async_processing removed — deprecated in 0.47+, causes silent failures
         translations={
             "start": t("🎙 Start listening"),
             "stop":  t("⏹ Stop listening"),
@@ -74,8 +78,11 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
     )
 
     new_chunks: list[str] = []
-    if ctx.state.playing and ctx.audio_processor is not None:
+    debug_msgs: list[str] = []
+
+    if ctx.audio_processor is not None:
         proc = ctx.audio_processor
+        # Drain transcript queue
         while not proc.transcript_queue.empty():
             try:
                 chunk = proc.transcript_queue.get_nowait()
@@ -83,9 +90,29 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
                     new_chunks.append(chunk)
             except Exception:
                 break
+        # Drain debug log for display
+        while not proc.debug_log.empty():
+            try:
+                debug_msgs.append(proc.debug_log.get_nowait())
+            except Exception:
+                break
 
-    if ctx.state.playing:
+    is_playing = ctx.state.playing if ctx.state else False
+
+    if is_playing:
         st.caption(t("🔴 Listening… transcript updates every few seconds"))
+
+    # Debug expander — always visible when processor exists so issues surface
+    if ctx.audio_processor is not None or debug_msgs:
+        with st.expander("🔧 Mic debug log", expanded=not is_playing):
+            if debug_msgs:
+                for msg in debug_msgs[-8:]:
+                    st.text(msg)
+            elif is_playing:
+                st.text("Waiting for audio frames…")
+            else:
+                st.text("Press 🎙 Start listening to begin.")
+
     return new_chunks
 
 

@@ -131,7 +131,19 @@ def ffmpeg_available() -> bool:
 # Real-time WebRTC audio processor
 # ---------------------------------------------------------------------------
 
-class WhisperAudioProcessor:
+def _make_audio_processor_base():
+    """
+    Return AudioProcessorBase from streamlit_webrtc, or a plain object
+    fallback so the class definition never crashes at import time.
+    """
+    try:
+        from streamlit_webrtc import AudioProcessorBase  # type: ignore
+        return AudioProcessorBase
+    except ImportError:
+        return object
+
+
+class WhisperAudioProcessor(_make_audio_processor_base()):  # type: ignore[misc]
     """
     streamlit-webrtc AudioProcessorBase subclass that transcribes incoming
     WebRTC audio frames in real time using Whisper.
@@ -140,26 +152,41 @@ class WhisperAudioProcessor:
     CHUNK_SECONDS seconds the buffer is transcribed and the result is pushed
     onto `transcript_queue` so the Streamlit main thread can read it.
 
+    The `debug_log` deque holds the last 20 status messages so the sidebar
+    can surface them without crashing the audio thread.
+
     Usage (inside app.py):
-        processor = webrtc_streamer(
+        ctx = webrtc_streamer(
             key="stt",
             mode=WebRtcMode.SENDONLY,
             audio_processor_factory=WhisperAudioProcessor.factory(language),
             media_stream_constraints={"audio": True, "video": False},
         )
         # drain queue each rerun:
-        while not processor.audio_processor.transcript_queue.empty():
-            chunk = processor.audio_processor.transcript_queue.get_nowait()
-            st.session_state.task_input += (" " + chunk)
+        if ctx.audio_processor:
+            while not ctx.audio_processor.transcript_queue.empty():
+                chunk = ctx.audio_processor.transcript_queue.get_nowait()
+                st.session_state.stt_pending_transcript += " " + chunk
     """
 
     def __init__(self, language: str = "en"):
-        self.language         = language
+        self.language          = language
         self.transcript_queue: queue.Queue[str] = queue.Queue()
-        self._buffer: list    = []          # list of float32 numpy arrays
-        self._buffer_samples  = 0
-        self._chunk_samples   = _CHUNK_SECONDS * _SAMPLE_RATE
-        self._lock            = threading.Lock()
+        self.debug_log: queue.Queue[str]        = queue.Queue(maxsize=20)
+        self._buffer: list     = []
+        self._buffer_samples   = 0
+        self._chunk_samples    = _CHUNK_SECONDS * _SAMPLE_RATE
+        self._lock             = threading.Lock()
+        self._log(f"Processor created — chunk={_CHUNK_SECONDS}s lang={language}")
+
+    def _log(self, msg: str) -> None:
+        """Push a debug message; drop oldest if full."""
+        try:
+            if self.debug_log.full():
+                self.debug_log.get_nowait()
+            self.debug_log.put_nowait(msg)
+        except Exception:
+            pass
 
     # -- factory helper so the language can be captured at construction time --
     @classmethod
@@ -174,45 +201,60 @@ class WhisperAudioProcessor:
         Receive an av.AudioFrame, accumulate samples, transcribe when
         enough audio has been collected.
         """
+        chunk_to_transcribe = None
         try:
-            import av  # type: ignore
-            # Convert frame to a mono float32 numpy array at 16 kHz
             audio_np = _av_frame_to_float32_mono(frame, target_sr=_SAMPLE_RATE)
             with self._lock:
                 self._buffer.append(audio_np)
                 self._buffer_samples += len(audio_np)
-
                 if self._buffer_samples >= self._chunk_samples:
-                    chunk = np.concatenate(self._buffer)
+                    chunk_to_transcribe  = np.concatenate(self._buffer)
                     self._buffer         = []
                     self._buffer_samples = 0
-            # Transcribe outside the lock so the audio thread is not blocked
-            if self._buffer_samples == 0 and len(chunk) > 0:
-                text = _transcribe_array(chunk, self.language)
+        except Exception as exc:
+            self._log(f"recv decode error: {exc}")
+            return frame
+
+        # Transcribe outside the lock — can be slow
+        if chunk_to_transcribe is not None:
+            try:
+                self._log(f"Transcribing {len(chunk_to_transcribe)/16000:.1f}s …")
+                text = _transcribe_array(chunk_to_transcribe, self.language)
                 if text:
+                    self._log(f"OK: {text[:60]}")
                     self.transcript_queue.put(text)
-        except Exception:
-            pass  # never crash the audio thread
+                else:
+                    self._log("Transcription returned empty string")
+            except Exception as exc:
+                self._log(f"transcribe error: {exc}")
+
         return frame
 
 
 def _av_frame_to_float32_mono(frame, target_sr: int = 16000):
-    """Convert an av.AudioFrame to a 1-D float32 numpy array at target_sr."""
+    """
+    Convert an av.AudioFrame to a 1-D float32 numpy array at target_sr.
+
+    Uses av's built-in resampler (AudioResampler) so the conversion is
+    correct for all sample-rate / layout / format combinations that
+    browsers send (typically s16/stereo/48000 Hz).
+    """
     import av  # type: ignore
 
-    # Reformat to signed 16-bit planar so we always know the layout
-    resampled = frame.to_ndarray(format="s16")
-    audio = resampled.astype("float32") / 32768.0
-    if audio.ndim > 1:
-        audio = audio.mean(axis=0)   # stereo → mono
+    resampler = av.AudioResampler(
+        format="fltp",          # float32 planar — Whisper-ready
+        layout="mono",
+        rate=target_sr,
+    )
+    resampled_frames = resampler.resample(frame)
+    # flush
+    resampled_frames += resampler.resample(None)
 
-    sr = frame.sample_rate
-    if sr != target_sr:
-        ratio   = target_sr / sr
-        new_len = int(len(audio) * ratio)
-        indices = np.linspace(0, len(audio) - 1, new_len)
-        audio   = np.interp(indices, np.arange(len(audio)), audio).astype("float32")
+    chunks = [f.to_ndarray() for f in resampled_frames if f is not None]
+    if not chunks:
+        return np.zeros(0, dtype="float32")
 
+    audio = np.concatenate(chunks, axis=1).flatten().astype("float32")
     return audio
 
 
