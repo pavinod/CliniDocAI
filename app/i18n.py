@@ -73,6 +73,20 @@ DE: dict[str, str] = {
     "Real-time STT unavailable — install requirements-voice.txt":
         "Echtzeit-STT nicht verfügbar — requirements-voice.txt installieren",
     "Voice input mode": "Spracheingabe-Modus",
+    # ---------------------------------------------------------- STT sidebar panel
+    "Option A — Live microphone": "Option A — Live-Mikrofon",
+    "Option B — Upload audio file": "Option B — Audiodatei hochladen",
+    "WAV / MP3 / M4A / OGG": "WAV / MP3 / M4A / OGG",
+    "▶ Start recording": "▶ Aufnahme starten",
+    "⏹ Stop recording": "⏹ Aufnahme stoppen",
+    "✓ Done": "✓ Fertig",
+    "Transcript (edit if needed):": "Transkript (bei Bedarf bearbeiten):",
+    "Use as task ↵": "Als Aufgabe verwenden ↵",
+    "Clear": "Löschen",
+    "Model: Whisper {size} (local, no internet)":
+        "Modell: Whisper {size} (lokal, kein Internet)",
+    "Transcribing…": "Transkribiere…",
+    "Recording… {s}s": "Aufnahme… {s}s",
     # ---------------------------------------------------------- run/messages
     "Reading documents…": "Dokumente werden gelesen…",
     "Role changed — enter a task for the new role":

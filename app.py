@@ -92,14 +92,16 @@ st.session_state.setdefault("canon_role", OTHER_ROLE)
 st.session_state.setdefault("screen_requested", False)
 st.session_state.setdefault("voice_language", "English")
 st.session_state.setdefault("voice_audio_hash", "")
-st.session_state.setdefault("voice_transcript", "")
+st.session_state.setdefault("voice_transcript", "")   # final accepted transcript
 st.session_state.setdefault("voice_error", "")
 st.session_state.setdefault("stt_upload_hash", "")
-st.session_state.setdefault("stt_mode", "realtime")   # "realtime" | "upload"
+st.session_state.setdefault("stt_pending_transcript", "")  # draft before "Use as task"
+st.session_state.setdefault("stt_recording", False)        # mic is live
 st.session_state.setdefault("ui_lang", "en")
 st.session_state.setdefault("ui_lang_seg", "EN")
 VOICE_AVAILABILITY = voice.is_available()
 WEBRTC_AVAILABLE   = voice.webrtc_available()
+_WHISPER_SIZE      = __import__("os").getenv("WHISPER_MODEL", "base")
 
 
 def _lang_changed() -> None:
@@ -182,53 +184,109 @@ with st.sidebar:
     st.text_area(t("Task"), height=75, key="task_input",
                  placeholder=t("What should this clinician review?"),
                  on_change=_task_changed)
+
+    # ================================================================
+    # Voice / STT panel — matches the screenshot layout:
+    #   Language selector
+    #   Model caption
+    #   Option A — Live microphone  [▶ Start recording]
+    #   Option B — Upload audio file  [file uploader]
+    #   [✓ Done]
+    #   Transcript (edit if needed):  [editable text area]
+    #   [Use as task ↵]  [Clear]
+    # ================================================================
     if voice_control_available(VOICE_AVAILABILITY):
         voice_lang_code = {"English": "en", "German": "de"}.get(
             _canon(st.session_state.voice_language, VOICE_LABEL_MAP), "en")
 
-        # ── mode toggle ────────────────────────────────────────────────
-        st.radio(
-            t("Voice input mode"),
-            options=["realtime", "upload"],
-            format_func=lambda m: (
-                t("Real-time microphone (live)") if m == "realtime"
-                else t("Upload audio file")),
-            key="stt_mode",
-            horizontal=True,
-            label_visibility="collapsed",
-        )
+        # ── Language ──────────────────────────────────────────────────
+        st.caption(t("Language"))
+        _lang_col_en, _lang_col_de = st.columns(2)
+        with _lang_col_en:
+            if st.button("🇬🇧 English" if voice_lang_code != "en" else "🟢 English",
+                         use_container_width=True, key="stt_lang_en"):
+                st.session_state.voice_language = "English"
+                st.rerun()
+        with _lang_col_de:
+            if st.button("🇩🇪 German" if voice_lang_code != "de" else "🟢 German",
+                         use_container_width=True, key="stt_lang_de"):
+                st.session_state.voice_language = "German"
+                st.rerun()
 
-        # ── real-time WebRTC mic ───────────────────────────────────────
-        if st.session_state.stt_mode == "realtime":
-            if WEBRTC_AVAILABLE:
-                new_chunks = render_realtime_stt(voice_lang_code, t)
-                if new_chunks:
-                    appended = (st.session_state.task_input.rstrip()
-                                + " " + " ".join(new_chunks)).strip()
-                    st.session_state.task_input     = appended
-                    st.session_state.voice_transcript = appended
-                    st.session_state.voice_error      = ""
-                    st.rerun()
-            else:
-                # Fallback: Streamlit built-in audio recorder
-                st.audio_input(t("Voice input"), key="task_audio",
-                               on_change=_transcribe_audio)
+        # ── Model caption ─────────────────────────────────────────────
+        st.caption(t("Model: Whisper {size} (local, no internet)",
+                     size=_WHISPER_SIZE))
 
-        # ── file upload ────────────────────────────────────────────────
+        # ── Option A — Live microphone ────────────────────────────────
+        st.markdown(f"**{t('Option A — Live microphone')}**")
+        if WEBRTC_AVAILABLE:
+            # WebRTC real-time streaming path
+            new_chunks = render_realtime_stt(voice_lang_code, t)
+            if new_chunks:
+                pending = (st.session_state.stt_pending_transcript.rstrip()
+                           + " " + " ".join(new_chunks)).strip()
+                st.session_state.stt_pending_transcript = pending
+                st.session_state.voice_error = ""
+                st.rerun()
         else:
-            text, err = render_file_upload_stt(voice_lang_code, t)
-            if err:
-                st.session_state.voice_error = err
-            elif text:
-                st.session_state.task_input     = text
-                st.session_state.voice_transcript = text
-                st.session_state.voice_error      = ""
+            # Fallback: Streamlit built-in one-shot recorder
+            st.audio_input(t("▶ Start recording"), key="task_audio",
+                           on_change=_transcribe_audio,
+                           label_visibility="collapsed")
+            if st.session_state.voice_transcript and not st.session_state.stt_pending_transcript:
+                st.session_state.stt_pending_transcript = st.session_state.voice_transcript
 
-    if st.session_state.voice_error:
-        st.warning(t("Voice transcription unavailable: {error}",
-                     error=st.session_state.voice_error))
-    if st.session_state.voice_transcript:
-        st.caption(t("Voice transcript — please check before use"))
+        # ── Option B — Upload audio file ──────────────────────────────
+        st.markdown(f"**{t('Option B — Upload audio file')}**")
+        st.caption("WAV / MP3 / M4A / OGG")
+
+        upload_text, upload_err = render_file_upload_stt(voice_lang_code, t)
+        if upload_err:
+            st.session_state.voice_error = upload_err
+        elif upload_text:
+            st.session_state.stt_pending_transcript = upload_text
+            st.session_state.voice_error = ""
+
+        # ── Done button ───────────────────────────────────────────────
+        if st.session_state.stt_pending_transcript:
+            if st.button(t("✓ Done"), use_container_width=True, key="stt_done"):
+                pass   # pending transcript stays; user edits below then accepts
+
+        # ── Transcript editor ─────────────────────────────────────────
+        if st.session_state.stt_pending_transcript:
+            st.markdown(f"**{t('Transcript (edit if needed):')}**")
+            edited = st.text_area(
+                t("Transcript (edit if needed):"),
+                value=st.session_state.stt_pending_transcript,
+                height=100,
+                key="stt_transcript_editor",
+                label_visibility="collapsed",
+            )
+            st.session_state.stt_pending_transcript = edited
+
+            _col_use, _col_clear = st.columns(2)
+            with _col_use:
+                if st.button(t("Use as task ↵"), use_container_width=True,
+                             key="stt_use", type="primary"):
+                    st.session_state.task_input = edited.strip()
+                    st.session_state.voice_transcript = edited.strip()
+                    st.session_state.stt_pending_transcript = ""
+                    st.session_state.voice_error = ""
+                    st.rerun()
+            with _col_clear:
+                if st.button(t("Clear"), use_container_width=True, key="stt_clear"):
+                    st.session_state.stt_pending_transcript = ""
+                    st.session_state.voice_transcript = ""
+                    st.session_state.voice_error = ""
+                    st.rerun()
+
+        if st.session_state.voice_error:
+            st.warning(t("Voice transcription unavailable: {error}",
+                         error=st.session_state.voice_error))
+
+    elif not voice_control_available(VOICE_AVAILABILITY):
+        st.caption(t("Voice input unavailable (install requirements-voice.txt)"))
+
     st.selectbox(t("Examples"), EXAMPLE_OPTIONS, key="example_choice",
                  format_func=t, on_change=_apply_example)
     show_facts = st.button(
