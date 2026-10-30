@@ -79,9 +79,13 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
 
     new_chunks: list[str] = []
     debug_msgs: list[str] = []
+    frame_count = 0
+    rms_level   = 0.0
 
     if ctx.audio_processor is not None:
         proc = ctx.audio_processor
+        frame_count = proc.frame_count
+        rms_level   = proc.rms_level
         # Drain transcript queue
         while not proc.transcript_queue.empty():
             try:
@@ -100,18 +104,40 @@ def render_realtime_stt(language_code: str, t) -> list[str]:
     is_playing = ctx.state.playing if ctx.state else False
 
     if is_playing:
-        st.caption(t("🔴 Listening… transcript updates every few seconds"))
+        st.caption(t("🔴 Listening… transcript appears below after each chunk"))
 
-    # Debug expander — always visible when processor exists so issues surface
-    if ctx.audio_processor is not None or debug_msgs:
-        with st.expander("🔧 Mic debug log", expanded=not is_playing):
-            if debug_msgs:
-                for msg in debug_msgs[-8:]:
-                    st.text(msg)
-            elif is_playing:
-                st.text("Waiting for audio frames…")
+    # ── Live mic diagnostics — always expanded while recording ──────────────
+    import os as _os
+    chunk_s = _os.getenv("WHISPER_CHUNK_SECONDS", "3")
+    with st.expander("🔧 Mic status", expanded=is_playing):
+        if not is_playing:
+            st.text("Press 🎙 Start listening to begin.")
+            st.caption("Allow microphone access in your browser when prompted.")
+        else:
+            # Level bar — always shown when playing (uses 0 until processor attaches)
+            bars    = int(min(rms_level * 200, 20))
+            bar_str = "█" * bars + "░" * (20 - bars)
+            level_pct = min(int(rms_level * 2000), 99)
+            st.text(f"🎙 Level: [{bar_str}] {level_pct}%")
+            st.text(f"📦 Frames received: {frame_count}")
+
+            if ctx.audio_processor is None:
+                st.info("⏳ Starting audio processor… (one moment)")
+            elif frame_count == 0:
+                st.warning(
+                    "⚠️ No audio frames yet — did the browser ask for mic "
+                    "permission? Check the address bar for a blocked mic icon.")
             else:
-                st.text("Press 🎙 Start listening to begin.")
+                st.success(f"✅ Mic active — speaking? Level should be > 0")
+
+            if debug_msgs:
+                st.markdown("**Log:**")
+                for msg in debug_msgs[-6:]:
+                    st.text(f"  {msg}")
+
+            st.caption(
+                f"Transcribes every ~{chunk_s}s · "
+                "result appears in **Transcript** box below")
 
     return new_chunks
 

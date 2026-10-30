@@ -60,7 +60,7 @@ _MODEL_SIZE    = os.getenv("WHISPER_MODEL", "base")
 _LANGUAGE      = os.getenv("WHISPER_LANGUAGE", "en")
 _SAMPLE_RATE   = int(os.getenv("VOICE_SAMPLE_RATE", "16000"))
 _MAX_SECONDS   = int(os.getenv("VOICE_MAX_SECONDS", "30"))
-_CHUNK_SECONDS = int(os.getenv("WHISPER_CHUNK_SECONDS", "4"))
+_CHUNK_SECONDS = int(os.getenv("WHISPER_CHUNK_SECONDS", "3"))
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +170,7 @@ class WhisperAudioProcessor(_make_audio_processor_base()):  # type: ignore[misc]
     """
 
     def __init__(self, language: str = "en"):
+        import av  # type: ignore
         self.language          = language
         self.transcript_queue: queue.Queue[str] = queue.Queue()
         self.debug_log: queue.Queue[str]        = queue.Queue(maxsize=20)
@@ -177,6 +178,15 @@ class WhisperAudioProcessor(_make_audio_processor_base()):  # type: ignore[misc]
         self._buffer_samples   = 0
         self._chunk_samples    = _CHUNK_SECONDS * _SAMPLE_RATE
         self._lock             = threading.Lock()
+        # Live diagnostics readable by the Streamlit main thread
+        self.frame_count: int   = 0      # total frames received
+        self.rms_level: float   = 0.0    # RMS of last batch (0–1 scale)
+        # Create resampler once — reusing it per-frame is correct and efficient
+        self._resampler = av.AudioResampler(
+            format="fltp",   # float32 planar — Whisper-ready
+            layout="mono",
+            rate=_SAMPLE_RATE,
+        )
         self._log(f"Processor created — chunk={_CHUNK_SECONDS}s lang={language}")
 
     def _log(self, msg: str) -> None:
@@ -195,67 +205,54 @@ class WhisperAudioProcessor(_make_audio_processor_base()):  # type: ignore[misc]
             return cls(language=language)
         return _make
 
-    # -- called by streamlit-webrtc in its audio thread ---------------------
-    def recv(self, frame):  # type: ignore[override]
+    # -- recv_queued: recommended over recv to avoid frame drops ---------------
+    def recv_queued(self, frames: list) -> list:  # type: ignore[override]
         """
-        Receive an av.AudioFrame, accumulate samples, transcribe when
-        enough audio has been collected.
+        Process a batch of av.AudioFrames.  Accumulate samples into the
+        rolling buffer; transcribe whenever CHUNK_SECONDS of audio accumulates.
+        Returns the same frames unchanged (SENDONLY mode ignores the return).
         """
         chunk_to_transcribe = None
         try:
-            audio_np = _av_frame_to_float32_mono(frame, target_sr=_SAMPLE_RATE)
-            with self._lock:
-                self._buffer.append(audio_np)
-                self._buffer_samples += len(audio_np)
-                if self._buffer_samples >= self._chunk_samples:
-                    chunk_to_transcribe  = np.concatenate(self._buffer)
-                    self._buffer         = []
-                    self._buffer_samples = 0
-        except Exception as exc:
-            self._log(f"recv decode error: {exc}")
-            return frame
+            parts = []
+            for frame in frames:
+                resampled = self._resampler.resample(frame)
+                for rf in resampled:
+                    if rf is not None:
+                        arr = rf.to_ndarray()          # shape: (1, N) float32 planar
+                        parts.append(arr.flatten().astype("float32"))
 
-        # Transcribe outside the lock — can be slow
+            if parts:
+                audio_np = np.concatenate(parts)
+                # Update live diagnostics
+                self.frame_count += len(frames)
+                self.rms_level    = float(np.sqrt(np.mean(audio_np ** 2)))
+                with self._lock:
+                    self._buffer.append(audio_np)
+                    self._buffer_samples += len(audio_np)
+                    if self._buffer_samples >= self._chunk_samples:
+                        chunk_to_transcribe  = np.concatenate(self._buffer)
+                        self._buffer         = []
+                        self._buffer_samples = 0
+        except Exception as exc:
+            self._log(f"recv_queued decode error: {exc}")
+            return frames
+
+        # Transcribe outside the lock — Whisper can take 0.5–2 s
         if chunk_to_transcribe is not None:
             try:
-                self._log(f"Transcribing {len(chunk_to_transcribe)/16000:.1f}s …")
+                dur = len(chunk_to_transcribe) / _SAMPLE_RATE
+                self._log(f"Transcribing {dur:.1f}s of audio…")
                 text = _transcribe_array(chunk_to_transcribe, self.language)
                 if text:
-                    self._log(f"OK: {text[:60]}")
+                    self._log(f"✓ {text[:80]}")
                     self.transcript_queue.put(text)
                 else:
-                    self._log("Transcription returned empty string")
+                    self._log("Whisper returned empty (silence?)")
             except Exception as exc:
                 self._log(f"transcribe error: {exc}")
 
-        return frame
-
-
-def _av_frame_to_float32_mono(frame, target_sr: int = 16000):
-    """
-    Convert an av.AudioFrame to a 1-D float32 numpy array at target_sr.
-
-    Uses av's built-in resampler (AudioResampler) so the conversion is
-    correct for all sample-rate / layout / format combinations that
-    browsers send (typically s16/stereo/48000 Hz).
-    """
-    import av  # type: ignore
-
-    resampler = av.AudioResampler(
-        format="fltp",          # float32 planar — Whisper-ready
-        layout="mono",
-        rate=target_sr,
-    )
-    resampled_frames = resampler.resample(frame)
-    # flush
-    resampled_frames += resampler.resample(None)
-
-    chunks = [f.to_ndarray() for f in resampled_frames if f is not None]
-    if not chunks:
-        return np.zeros(0, dtype="float32")
-
-    audio = np.concatenate(chunks, axis=1).flatten().astype("float32")
-    return audio
+        return frames
 
 
 def _transcribe_array(audio_np, language: str = "en") -> str:
