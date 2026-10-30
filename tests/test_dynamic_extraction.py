@@ -101,16 +101,16 @@ def test_multiline_episode_and_exam_findings_are_source_derived():
     ultrasound = next(f for f in facts if f.category == "procedure.imaging"
                       and f.text.startswith("Cerebral artery ultrasound"))
 
-    assert "185/110 mmHg" in episode.text
-    assert "\n185/110 mmHg" in episode.original
-    assert "2 puffs of nitroglycerin spray" in nitro.text
+    assert "198/105 mmHg" in episode.text
+    assert "\n198/105 mmHg" in episode.original
+    assert "4 puffs of nitroglycerin spray" in nitro.text
     assert "Keine Blutung" in head_ct.original
     assert "no haemorrhage" in head_ct.text
-    assert head_ct.date == "2015-06-11"
-    assert "11 Jun 2015" not in head_ct.text
-    assert "150 cm/sek" in ultrasound.original
-    assert ultrasound.date == "2015-06-11"
-    assert "150 cm" in ultrasound.text
+    assert head_ct.date == "2019-09-03"
+    assert "3 Sep 2019" not in head_ct.text
+    assert "210 cm/sek" in ultrasound.original
+    assert ultrasound.date == "2019-09-03"
+    assert "210 cm" in ultrasound.text
 
 
 def test_history_uses_date_in_evidence_before_admission_date():
@@ -157,11 +157,11 @@ def test_history_event_items_merge_details_and_keep_treatment_separate():
                   if item["text"].startswith("Emergency treatment")]
     assert len(crises) == 1
     assert crises[0]["text"] == (
-        "Hypertensive crisis — dizziness, vision symptoms; peak BP 185/110 mmHg")
+        "Hypertensive crisis — dizziness, vision symptoms; peak BP 205/120 mmHg")
     assert len(crises[0]["sources"]) == 2
     assert crises[0]["date"] == "11 Feb 2024"
     assert len(treatments) == 1
-    assert "2 puffs of nitroglycerin spray" in treatments[0]["text"]
+    assert "3 puffs of nitroglycerin spray" in treatments[0]["text"]
 
 
 def test_history_diagnosis_list_does_not_span_adjacent_findings():
@@ -171,7 +171,7 @@ def test_history_diagnosis_list_does_not_span_adjacent_findings():
                   if f.category == "history.event"
                   and f.text.startswith("Hypertensive crisis"))
 
-    assert crisis.original == "Hypertensive Krise mit Schwindel und Sehstörung"
+    assert crisis.original == "Hypertensive Krise begleitet von Kopfdruck und Schwindel"
     assert "55 Prozent" not in crisis.original
 
 

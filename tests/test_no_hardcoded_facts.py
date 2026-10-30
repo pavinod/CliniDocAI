@@ -21,9 +21,28 @@ FORBIDDEN = [
 ]
 
 
+RUNTIME_FILES = sorted(
+    [ROOT / "app.py", *ROOT.joinpath("app").rglob("*.py"),
+     *ROOT.joinpath("clinidocai").rglob("*.py")])
+ANSWER_KEY_REFERENCES = [r"expected\.json", r"situations\.md", r"\bcases[/\\]"]
+
+
+def test_runtime_code_never_reads_the_answer_key():
+    findings = []
+    for path in RUNTIME_FILES:
+        for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            for pattern in ANSWER_KEY_REFERENCES:
+                if re.search(pattern, line):
+                    findings.append(
+                        f"{path.relative_to(ROOT)}:{number}: {line.strip()}")
+    assert not findings, "\n".join(findings)
+
+
 def test_application_code_has_no_patient_specific_fact_literals():
     application_files = sorted(
-        [*ROOT.joinpath("app").rglob("*"), *ROOT.joinpath("clinidocai").rglob("*")])
+        [ROOT / "app.py", *ROOT.joinpath("app").rglob("*"),
+         *ROOT.joinpath("clinidocai").rglob("*")])
     findings = []
     for path in application_files:
         if not path.is_file():

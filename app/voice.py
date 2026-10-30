@@ -1,25 +1,42 @@
 """
 Local Whisper STT (Speech-to-Text) for CliniDocAI.
 
-Two input modes
----------------
-1. Live microphone recording  – non-blocking background thread records audio
-   while Streamlit shows a countdown; calling stop() returns WAV bytes.
-2. File upload                – accepts WAV / MP3 / M4A / OGG bytes.
-
-Both modes share the same transcribe() path.
-
-Architecture note
+Three input modes
 -----------------
+1. WebRTC real-time  – streamlit-webrtc streams browser mic audio; chunks are
+   transcribed incrementally in an async worker.
+2. Live microphone   – non-blocking background thread records audio via
+   sounddevice while Streamlit shows a countdown; calling stop() returns WAV.
+3. File upload       – accepts WAV / MP3 / M4A / OGG bytes.
+
+All modes share the same transcribe() path.
+
+Critical implementation notes (WhisperAudioProcessor)
+------------------------------------------------------
+* recv_queued MUST be ``async def`` — streamlit-webrtc schedules it with
+  loop.create_task().  A sync def returns a list which causes
+  ``TypeError: a coroutine was expected`` → the worker thread dies silently
+  and "frames received" stays 0 forever.
+* Use av.AudioResampler(format="fltp", layout="mono", rate=16000) — created
+  once in __init__ — to convert browser audio (48 kHz stereo s16) to Whisper
+  input (16 kHz mono float32).
+* Run whisper.transcribe via ``await asyncio.to_thread(...)`` so inference
+  never blocks the asyncio event loop.
+* Pre-load the model in a daemon thread on processor creation (10 s budget).
+* Do NOT pass ``async_processing`` to webrtc_streamer — deprecated, silent
+  failure.
+
+Architecture note (MicRecorder)
+---------------------------------
 MicRecorder runs the sounddevice InputStream callback in a BACKGROUND THREAD.
 The Streamlit main thread never sleeps — it only reads state flags and calls
-stop() when the user presses the button.  This avoids the websocket freeze
-that happens when time.sleep() is called in the Streamlit execution path.
+stop() when the user presses the button.
 
 Requirements
 ------------
-  pip install openai-whisper sounddevice soundfile
-  ffmpeg on PATH  (winget install Gyan.FFmpeg)
+  pip install openai-whisper sounddevice soundfile numpy
+  pip install streamlit-webrtc==0.79.0 aiortc>=1.14.0 av>=14.0.0
+  ffmpeg on PATH  (winget install Gyan.FFmpeg) — only for MP3/M4A/OGG uploads
 
 Environment variables
 ---------------------
@@ -30,8 +47,10 @@ Environment variables
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import os
+import queue
 import shutil
 import tempfile
 import threading
@@ -77,12 +96,12 @@ def get_model():
 
 
 # ---------------------------------------------------------------------------
-# Availability check
+# Availability checks
 # ---------------------------------------------------------------------------
 
 def is_available() -> tuple[bool, str]:
     """
-    Returns (True, "") when voice input is fully usable,
+    Returns (True, "") when basic voice input is fully usable,
     or (False, human-readable reason) otherwise.
 
     ffmpeg is NOT required for microphone recording — MicRecorder produces
@@ -98,9 +117,141 @@ def is_available() -> tuple[bool, str]:
     return True, ""
 
 
+def webrtc_available() -> bool:
+    """True if streamlit-webrtc + av + aiortc are installed."""
+    try:
+        import streamlit_webrtc  # type: ignore  # noqa: F401
+        import av                # type: ignore  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def ffmpeg_available() -> bool:
     """True if ffmpeg is on PATH (needed only for uploaded MP3/M4A/OGG files)."""
     return shutil.which("ffmpeg") is not None
+
+
+# ---------------------------------------------------------------------------
+# WebRTC real-time audio processor
+# ---------------------------------------------------------------------------
+
+class WhisperAudioProcessor:
+    """
+    streamlit-webrtc AudioProcessorBase that transcribes browser mic audio
+    incrementally using local Whisper.
+
+    Usage
+    -----
+    Pass to webrtc_streamer(audio_processor_factory=WhisperAudioProcessor).
+    Poll .drain_transcript() from a st.fragment to get new text chunks.
+
+    Critical: recv_queued MUST be ``async def`` — webrtc schedules it with
+    loop.create_task().  A sync version silently kills the worker thread.
+    """
+
+    def __init__(self):
+        try:
+            import av as _av  # type: ignore
+            self._resampler = _av.AudioResampler(
+                format="fltp", layout="mono", rate=16000)
+        except ImportError:
+            self._resampler = None
+
+        self._buf: list    = []          # raw float32 numpy chunks
+        self._buf_lock     = threading.Lock()
+        self._transcript_q: queue.Queue[str] = queue.Queue()
+        self._last_flush   = time.monotonic()
+        self._flush_every  = 3.0         # seconds between transcription bursts
+        self._language     = _LANGUAGE
+
+        # Pre-load the model in a daemon thread to stay within the 10 s
+        # budget that webrtc allows for processor creation.
+        t = threading.Thread(target=get_model, daemon=True)
+        t.start()
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+
+    def set_language(self, lang: str) -> None:
+        """ISO-639-1 language code, e.g. 'en' or 'de'."""
+        self._language = lang
+
+    def drain_transcript(self) -> str:
+        """Drain all queued transcript chunks and return them joined."""
+        parts = []
+        while True:
+            try:
+                parts.append(self._transcript_q.get_nowait())
+            except queue.Empty:
+                break
+        return " ".join(parts).strip()
+
+    # ------------------------------------------------------------------
+    # streamlit-webrtc interface
+    # ------------------------------------------------------------------
+
+    async def recv_queued(self, frames):
+        """
+        Called by streamlit-webrtc with a batch of av.AudioFrame objects.
+
+        MUST be async def — the library schedules it with
+        loop.create_task().  A sync def causes TypeError silently.
+        """
+        if not frames:
+            return frames
+
+        if np is None or self._resampler is None:
+            return frames
+
+        # Resample each frame to 16 kHz mono float32
+        chunks = []
+        for frame in frames:
+            resampled = self._resampler.resample(frame)
+            for rf in (resampled if isinstance(resampled, list) else [resampled]):
+                arr = rf.to_ndarray()           # shape: (1, samples) fltp
+                chunks.append(arr[0].astype("float32"))
+
+        if chunks:
+            audio_chunk = np.concatenate(chunks)
+            with self._buf_lock:
+                self._buf.append(audio_chunk)
+
+        # Flush to Whisper every _flush_every seconds
+        now = time.monotonic()
+        if now - self._last_flush >= self._flush_every:
+            self._last_flush = now
+            with self._buf_lock:
+                buf_copy = list(self._buf)
+
+            if buf_copy:
+                total_samples = sum(len(c) for c in buf_copy)
+                duration = total_samples / 16000
+                audio_np = np.concatenate(buf_copy)
+                # Run Whisper in a thread to avoid blocking the event loop
+                text = await asyncio.to_thread(
+                    self._run_whisper, audio_np, self._language)
+                if text:
+                    self._transcript_q.put(text)
+
+        return frames
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _run_whisper(audio_np, language: str) -> str:
+        try:
+            model = get_model()
+            kwargs = {"fp16": False}
+            if language:
+                kwargs["language"] = language
+            result = model.transcribe(audio_np, **kwargs)
+            return (result.get("text") or "").strip()
+        except Exception:
+            return ""
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +294,6 @@ class MicRecorder:
         except ImportError as e:
             raise VoiceError(f"sounddevice not installed: {e}") from e
 
-        # Prefer the Intel Smart Sound mic (device index 1) if it exists,
-        # fall back to system default otherwise.
         device = _pick_input_device()
 
         self._frames     = []
@@ -153,7 +302,6 @@ class MicRecorder:
         self._stop_event.clear()
 
         def _callback(indata, frames, time_info, status):
-            # This runs in the sounddevice background thread — never in Streamlit.
             if self._running:
                 with self._lock:
                     self._frames.append(indata.copy())
@@ -164,7 +312,7 @@ class MicRecorder:
                 samplerate=self._sr,
                 channels=1,
                 dtype="float32",
-                blocksize=1024,       # small blocks → low latency
+                blocksize=1024,
                 callback=_callback,
             )
             self._stream.start()
@@ -243,9 +391,6 @@ def _pick_input_device() -> Optional[int]:
     Preference order:
       1. First real hardware microphone (not a Voicemeeter virtual device)
       2. System default (None)
-
-    Voicemeeter virtual inputs can intercept audio unpredictably on Windows,
-    so we skip them when a physical mic is available.
     """
     try:
         import sounddevice as sd  # type: ignore
@@ -256,15 +401,13 @@ def _pick_input_device() -> Optional[int]:
             if max_in < 1:
                 continue
             low = name.lower()
-            # Skip Voicemeeter virtual devices
             if "voicemeeter" in low:
                 continue
-            # Prefer any real hardware mic
             if any(kw in low for kw in ("microphone", "mic", "intel", "realtek", "input", "array")):
                 return i
     except Exception:
         pass
-    return None   # let sounddevice pick the system default
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -311,12 +454,9 @@ def transcribe(wav_bytes: bytes, language: str = _LANGUAGE) -> str:
 
     Fast path (no ffmpeg needed):
       WAV bytes → soundfile → numpy float32 → whisper.transcribe(array)
-      MicRecorder always produces WAV, so microphone recording works
-      without ffmpeg installed.
 
     Fallback path (ffmpeg required):
       Non-WAV uploads (MP3/M4A/OGG) → temp file → whisper.transcribe(path)
-      Requires ffmpeg on PATH.  Install: winget install Gyan.FFmpeg
 
     Parameters
     ----------
@@ -346,11 +486,9 @@ def transcribe(wav_bytes: bytes, language: str = _LANGUAGE) -> str:
     try:
         buf = io.BytesIO(wav_bytes)
         audio_np, sr = sf.read(buf, dtype="float32", always_2d=False)
-        # Whisper expects 16 kHz mono float32
         if audio_np.ndim > 1:
-            audio_np = audio_np[:, 0]          # take first channel
+            audio_np = audio_np[:, 0]
         if sr != 16000:
-            # Simple linear resampling — good enough for speech
             import numpy as _np
             ratio     = 16000 / sr
             new_len   = int(len(audio_np) * ratio)
@@ -361,7 +499,7 @@ def transcribe(wav_bytes: bytes, language: str = _LANGUAGE) -> str:
     except VoiceError:
         raise
     except Exception:
-        pass   # WAV decode failed — fall through to ffmpeg path
+        pass
 
     # ── Fallback path: non-WAV file via ffmpeg ───────────────────────────────
     if not ffmpeg_available():

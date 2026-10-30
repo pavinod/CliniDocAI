@@ -1,0 +1,22 @@
+# patient data and hackathon answer keys — never publish
+data/
+data
+cases/
+eval/expected.json
+eval/situations.md
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# local environment and editor files
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# evaluation outputs contain patient-derived facts
+eval/comparison/

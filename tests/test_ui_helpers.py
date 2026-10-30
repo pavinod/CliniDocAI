@@ -46,43 +46,34 @@ def test_fact_display_text_uses_normalized_original_in_german():
     assert fact_display_text(item, "de") == "German source wording"
 
 
-def test_fact_display_text_uses_shortest_nonempty_quote_in_german():
+def test_fact_display_text_never_picks_an_arbitrary_source_quote():
+    # A fact's sources can include a contradicting passage (e.g. the wrong
+    # side). Without its own German line the fact must stay in English.
     item = ScreenItem(
-        text="English fact",
+        text="Flow velocity in the internal carotid artery",
         sources=[
-            {"quote": "  A longer\nsource wording  "},
-            {"quote": " \n "},
-            {"quote": "  Shorter\tsource  "},
+            {"docDate": "2015-06-28", "quote": "Rechts findet sich ..."},
+            {"docDate": "2015-06-11", "quote": "Links findet sich ..."},
         ],
     )
 
-    assert fact_display_text(item, "de") == "Shorter source"
+    assert fact_display_text(item, "de") == item.text
 
 
-def test_fact_display_text_prefers_newest_quote_over_shorter_old_quote():
+def test_fact_display_text_keeps_english_when_fact_has_a_change_note():
     item = ScreenItem(
-        text="English fact",
-        sources=[
-            {"docDate": "2015-06-11", "quote": "Short old quote"},
-            {"docDate": "2015-06-28",
-             "quote": "Longer wording from the newest document"},
-        ],
-    )
+        text="Drug A 16 mg (1-0-1) (in the Jun 2015 letter: 1-0-1/2)",
+        original="Drug A 16 mg täglich morgens und abends")
 
-    assert fact_display_text(item, "de") == (
-        "Longer wording from the newest document")
+    assert fact_display_text(item, "de") == item.text
 
 
-def test_fact_display_text_uses_shortest_quote_when_dates_tie():
-    item = ScreenItem(
-        text="English fact",
-        sources=[
-            {"docDate": "2015-06-28", "quote": "A longer quote"},
-            {"docDate": "2015-06-28", "quote": "Short quote"},
-        ],
-    )
+def test_fact_display_text_skips_headings_and_fragments_in_german():
+    heading = ScreenItem(text="Echocardiography", original="Echokardiographie:")
+    fragment = ScreenItem(text="Pressure 22 mmHg", original="(RVOT 28mm), kein ...")
 
-    assert fact_display_text(item, "de") == "Short quote"
+    assert fact_display_text(heading, "de") == "Echocardiography"
+    assert fact_display_text(fragment, "de") == "Pressure 22 mmHg"
 
 
 def test_fact_display_text_translates_generated_warning_suffixes():
@@ -127,3 +118,13 @@ def test_fact_display_text_truncates_german_source_at_word_boundary():
     assert result.endswith(" …")
     assert len(result) <= 300
     assert result[:-2].endswith("source")
+
+
+def test_composed_facts_stay_in_english_in_german_mode():
+    joined = ScreenItem(text="Biopsy planned, later performed",
+                        original="Biopsie geplant. / Biopsie erfolgte.")
+    noted = ScreenItem(text="Surgery — recommended (documented 1 Jan 2020)",
+                       original="Eine Operation wird empfohlen.")
+
+    assert fact_display_text(joined, "de") == joined.text
+    assert fact_display_text(noted, "de") == noted.text

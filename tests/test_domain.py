@@ -133,18 +133,16 @@ def test_bmi_contradiction_uses_plain_document_label():
     assert len(contradiction.evidence) == 3
     assert {span.quote.split(":", 1)[0].casefold()
             for span in contradiction.evidence} == {"grösse", "gewicht", "bmi"}
-    from app.pdf import render_pdf
-    from pypdf import PdfReader
-    import io
+    from app.ui_helpers import screen_to_json
     screen = Screen(
         role="clinician", task_text="Review the record",
         reference_date="2016-04-15", sections=[],
         contradictions=[contradiction], missing=[])
-    pdf_text = "".join(
-        page.extract_text() for page in PdfReader(io.BytesIO(
-            render_pdf(screen))).pages)
-    assert "Discharge letter, 2015-06" in pdf_text
-    assert "Stat. Patientenbrief" not in pdf_text
+    exported = screen_to_json(screen)["contradictions"][0]
+    assert "Discharge letter, 2015-06" in exported["title"]
+    assert "Stat. Patientenbrief" not in exported["title"]
+    assert len(exported["passages"]) == 3
+    assert all(passage["quote"] for passage in exported["passages"])
 
 
 # ---- clinical semantics ---------------------------------------------------
@@ -161,7 +159,7 @@ def test_status_semantics(facts):
     assert neg or pos  # negation handled one way or another
 
 
-def test_future_surgery_is_planned_in_screen_and_pdf():
+def test_future_surgery_is_planned_in_screen_and_export():
     screen, _ = build_screen_model(
         "Surgeon: planning the quadrantectomy", FIX)
     item = next(item for section in screen.sections
@@ -169,15 +167,17 @@ def test_future_surgery_is_planned_in_screen_and_pdf():
                 for item in section.items
                 if "quadrantectomy" in item.text.lower())
     assert item.status == "planned"
-    assert item.date == "16 May 2016"
+    assert item.date == "23 May 2016"
 
-    from app.pdf import render_pdf
-    from pypdf import PdfReader
-    import io
-    pdf = render_pdf(screen)
-    text = "".join(page.extract_text() for page in PdfReader(io.BytesIO(pdf)).pages)
-    assert "PLANNED" in text
-    assert "16 May 2016" in text
+    from app.ui_helpers import screen_to_json
+    exported = next(
+        exported_item
+        for section in screen_to_json(screen)["sections"]
+        if section["key"] == "plan.treatment"
+        for exported_item in section["items"]
+        if exported_item["text"] == item.text)
+    assert exported["status"] == "planned"
+    assert exported["date"] == "23 May 2016"
 
 
 def test_support_drops_only_laterality_conflicting_span(data):
@@ -507,14 +507,15 @@ def test_new_role_paraphrases():
          {"dx.oncology"}, True, True),
     ],
 )
-def test_role_first_needs(situation, expected_role, first_sections, oncology,
-                          has_surgery):
+def test_allergies_then_role_first_needs(situation, expected_role, first_sections,
+                                         oncology, has_surgery):
     needs.load_profiles()
     role = needs.detect_role(situation)
     sections = needs.select_needs(role, situation)
     keys = [section.key for section in sections]
     assert role == expected_role
-    assert keys[0] in first_sections
+    assert keys[0] == "allergy"  # safety information is always on top
+    assert keys[1] in first_sections
     assert ("dx.oncology" in keys) is oncology
     if has_surgery:
         assert "plan.treatment" in keys
@@ -551,17 +552,21 @@ def test_screen_schema_valid():
         "Rule-based extraction (no AI model) — pending clinician review")
 
 
-def test_pdf_matches_screen():
-    from app.pdf import render_pdf
-    from pypdf import PdfReader
-    import io
+def test_json_export_matches_screen():
+    from app.ui_helpers import screen_to_json
     screen, _ = build_screen_model("You are the surgeon planning the operation.", FIX)
-    pdf = render_pdf(screen)
-    reader = PdfReader(io.BytesIO(pdf))
-    text = "".join(p.extract_text() for p in reader.pages)
-    first = next(i for s in screen.sections for i in s.items)
-    assert first.text[:40] in text
-    assert "Draft - please verify against sources" in text
+    exported = screen_to_json(screen)
+    shown = [(s.key, i.text) for s in screen.sections
+             for i in [*s.items, *s.more]]  # all facts are displayed
+    exported_shown = [(s["key"], i["text"]) for s in exported["sections"]
+                      for i in s["items"] if i["visible_without_clicking"]]
+    assert exported_shown == shown
+    assert exported["review_status"].endswith("pending clinician review")
+    first = next(i for s in exported["sections"] for i in s["items"]
+                 if i["sources"])
+    source = first["sources"][0]
+    assert source["doc"] and source["quote"]  # full quote, not truncated
+    assert isinstance(source["start"], int) and isinstance(source["end"], int)
 
 
 def test_missing_data_dir_returns_recoverable_error(tmp_path):
@@ -570,3 +575,18 @@ def test_missing_data_dir_returns_recoverable_error(tmp_path):
         "You are the nurse. Admission before surgery.", tmp_path / "does-not-exist")
     assert screen.errors and "failed to load documents" in screen.errors[0]
     assert screen.sections == [] and screen.missing == [] and screen.contradictions == []
+
+
+def test_specific_task_words_promote_their_sections():
+    needs.load_profiles()
+    keys = [s.key for s in needs.select_needs(
+        "gp", "You are her GP. Check which follow-ups are still open.")]
+    assert keys[:2] == ["allergy", "followup"]
+
+
+def test_generic_timing_words_do_not_reorder_sections():
+    needs.load_profiles()
+    keys = [s.key for s in needs.select_needs(
+        "pharmacist", "Medication reconciliation before surgery")]
+    assert keys[:2] == ["allergy", "meds.current"]
+    assert keys.index("plan.treatment") > keys.index("meds.current")
