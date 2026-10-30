@@ -167,10 +167,17 @@ class HttpAdapter:
             "Decide whether QUOTE supports CLAIM. Answer exactly one token: "
             "supported, unsupported, or unchecked.\n"
             f"QUOTE: {quote}\nORIGINAL WORDING: {original or ''}\nCLAIM: {claim}")
+        text = self.complete(prompt, max_tokens=4).strip().lower()
+        if text not in ("supported", "unsupported", "unchecked"):
+            raise ModelError(f"invalid model verdict: {text!r}")
+        return text
+
+    def complete(self, prompt: str, max_tokens: int = 1024) -> str:
+        """One chat completion; raises ModelError on any transport problem."""
         body = json.dumps({
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0, "max_tokens": 4,
+            "temperature": 0, "max_tokens": max_tokens,
         }).encode()
         req = urllib.request.Request(
             self.url, data=body,
@@ -184,12 +191,65 @@ class HttpAdapter:
         except TimeoutError as e:
             raise ModelError("model request timed out") from e
         try:
-            text = payload["choices"][0]["message"]["content"].strip().lower()
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+            return str(payload["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError) as e:
             raise ModelError("invalid model output") from e
-        if text not in ("supported", "unsupported", "unchecked"):
-            raise ModelError(f"invalid model verdict: {text!r}")
-        return text
+
+
+# Available OpenRouter models (shown in the UI selector)
+OPENROUTER_MODELS: list[tuple[str, str]] = [
+    ("openrouter/free",                              "OpenRouter — free tier"),
+    ("deepseek/deepseek-v4-flash",                   "DeepSeek v4 Flash"),
+    ("deepseek/deepseek-v4.1-flash-1017",            "DeepSeek v4.1 Flash"),
+    ("z-ai/glm-4.7-flash",                           "GLM-4.7 Flash"),
+    ("z-ai/glm-flash-latest",                        "GLM Flash Latest"),
+    ("moonshotai/kimi-latest",                       "Kimi Latest"),
+    ("anthropic/claude-haiku-5.5",                   "Claude Haiku 5.5"),
+    ("openai/gpt-5-nano",                            "GPT-5 Nano"),
+    ("openai/gpt-5.6-luna",                          "GPT-5.6 Luna"),
+    ("openai/gpt-5.1-codex-mini",                    "GPT-5.1 Codex Mini"),
+    ("google/gemini-3.1-flash-lite",                 "Gemini 3.1 Flash Lite"),
+    ("qwen/qwen3-coder-30b-a3b-instruct",            "Qwen3 Coder 30B"),
+    ("qwen/qwen3-vl-30b-a3b-instruct",               "Qwen3 VL 30B"),
+    ("mistralai/mistral-small-3.2-24b-instruct",     "Mistral Small 3.2 24B"),
+    ("meta-llama/llama-4-scout",                     "Llama 4 Scout"),
+]
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+RULE_BASED_CHOICE = "none"
+LMSTUDIO_CHOICE = "lmstudio"
+
+
+def model_choices() -> list[tuple[str, str]]:
+    """(choice id, label) pairs for the UI selector; rule-based first."""
+    return ([(RULE_BASED_CHOICE, "Rule-based only (no AI model)")]
+            + [(f"openrouter:{model_id}", f"OpenRouter · {label}")
+               for model_id, label in OPENROUTER_MODELS]
+            + [(LMSTUDIO_CHOICE, "LM Studio (local model)")])
+
+
+def adapter_for_choice(choice: str) -> tuple["ModelAdapter | None", str | None]:
+    """Build the adapter for a UI choice without touching os.environ.
+
+    Returns (adapter, problem). A missing API key yields (None, message) so the
+    caller can stay rule-based and tell the user why.
+    """
+    timeout = float(os.environ.get("MODEL_TIMEOUT_S",
+                                   os.environ.get("CLINIDOC_MODEL_TIMEOUT", "8")))
+    if choice.startswith("openrouter:"):
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not key:
+            return None, "OPENROUTER_API_KEY is not set"
+        return HttpAdapter(f"{OPENROUTER_BASE_URL}/chat/completions", key,
+                           timeout, choice.removeprefix("openrouter:")), None
+    if choice == LMSTUDIO_CHOICE:
+        base = os.environ.get("LM_STUDIO_URL",
+                              "http://localhost:1234/v1").rstrip("/")
+        return HttpAdapter(f"{base}/chat/completions",
+                           os.environ.get("LM_STUDIO_API_KEY", "lm-studio"),
+                           timeout, os.environ.get("LM_STUDIO_MODEL", "local")), None
+    return DeterministicAdapter(), None
 
 
 def get_adapter() -> ModelAdapter:
@@ -197,6 +257,7 @@ def get_adapter() -> ModelAdapter:
 
     Supports the scaffold variable names:
       MODEL_PROVIDER=none            -> deterministic rules only
+      MODEL_PROVIDER=openrouter      -> OPENROUTER_API_KEY / OPENROUTER_MODEL / MODEL_TIMEOUT_S
       MODEL_PROVIDER=openai          -> OPENAI_API_KEY / OPENAI_MODEL / MODEL_TIMEOUT_S
       MODEL_PROVIDER=lmstudio        -> LM_STUDIO_URL / LM_STUDIO_API_KEY / LM_STUDIO_MODEL
     Legacy override: CLINIDOC_MODEL=http + CLINIDOC_MODEL_URL.
@@ -204,6 +265,11 @@ def get_adapter() -> ModelAdapter:
     provider = os.environ.get("MODEL_PROVIDER", os.environ.get("CLINIDOC_MODEL", "none"))
     timeout = float(os.environ.get("MODEL_TIMEOUT_S",
                                    os.environ.get("CLINIDOC_MODEL_TIMEOUT", "8")))
+    if provider == "openrouter":
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        model = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
+        return HttpAdapter(
+            f"{OPENROUTER_BASE_URL}/chat/completions", key, timeout, model)
     if provider == "openai":
         return HttpAdapter("https://api.openai.com/v1/chat/completions",
                            os.environ.get("OPENAI_API_KEY", ""), timeout,

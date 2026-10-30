@@ -61,7 +61,10 @@ NEED_DEFS: dict[str, Section] = {
                        ("measurement.ef", "measurement.cardiac", "procedure.cardiac",
                         "measurement.heart_rate")),
     "vitals": Section("vitals", "Vitals & measurements (latest each)", "latest",
-                      ("measurement.",)),
+                      ("measurement.",),
+                      # cardiac, vascular and lab values have their own sections
+                      exclude=("measurement.ef", "measurement.cardiac",
+                               "measurement.vascular", "measurement.hba1c")),
     "weight": Section("weight", "Weight course", "computed", builder="weight"),
     "hba1c": Section("hba1c", "HbA1c", "computed", builder="hba1c"),
     "labs": Section("labs", "Laboratory results", "computed", builder="labs"),
@@ -142,8 +145,7 @@ ROLE_NEEDS: dict[str, list[str]] = {
                      "anesthesia", "lifestyle", "anticoag"],
     "surgeon": ["dx.oncology", "imaging.breast", "plan.treatment", "meds.antithrombotic",
                 "allergy", "dx.active", "meds.current", "vitals", "anticoag", "renal"],
-    "gp": ["dx.active", "meds.current", "allergy", "vitals", "hba1c", "followup",
-           "procedures"],
+    "gp": ["dx.active", "meds.current", "allergy", "vitals", "hba1c", "followup"],
     "emergency": ["history", "dx.vascular", "allergy", "contrast",
                   "meds.antihypertensive", "meds.current", "vitals", "cardiac",
                   "anticoag"],
@@ -222,6 +224,7 @@ def detect_role(text: str) -> str:
 def select_needs(role: str, text: str) -> list[Section]:
     low = text.lower()
     task_keys: list[str] = []
+    generic_keys: list[str] = []
     for task_rule in TASK_NEEDS:
         pat, extra_groups = task_rule[:2]
         allowed_roles = task_rule[2] if len(task_rule) > 2 else None
@@ -229,12 +232,31 @@ def select_needs(role: str, text: str) -> list[Section]:
             continue
         if re.search(pat, low):
             for g in extra_groups:
+                target = generic_keys if g in GENERIC_TASK_GROUPS else task_keys
                 for k in TASK_EXTRA[g]:
-                    if k not in task_keys:
-                        task_keys.append(k)
+                    if k not in target:
+                        target.append(k)
     role_keys = ROLE_NEEDS.get(role, ROLE_NEEDS["clinician"])
-    keys = role_keys + [k for k in task_keys if k not in role_keys]
+
+    def role_rank(key: str) -> tuple[int, int]:
+        in_role = key in role_keys
+        return (0 if in_role else 1,
+                role_keys.index(key) if in_role else task_keys.index(key))
+
+    # Safety first for every role, then the sections the task specifically
+    # asks for (in the role's usual order), then the rest of the role's
+    # sections, then sections only implied by generic task words.
+    keys = list(SAFETY_FIRST)
+    for key in sorted(task_keys, key=role_rank) + role_keys + generic_keys:
+        if key not in keys:
+            keys.append(key)
     return [NEED_DEFS[k] for k in keys]
+
+
+SAFETY_FIRST = ("allergy",)
+# Task groups triggered by words that say *when* rather than *what*
+# ("before surgery", "on admission"); they add sections but never reorder.
+GENERIC_TASK_GROUPS = {"surgery_date", "admission"}
 
 
 # -------------------------------------------------------------- assembling
@@ -609,9 +631,145 @@ def _limit_overloaded_sections(sections: list[dict], role: str,
             section["more"] = [item for _, item in ranked[6:]]
         else:
             section.setdefault("more", [])
+    _keep_conflicting_values_visible(sections)
+
+
+GENERAL_ROLES = {"gp", "internist", "clinician"}
+# Sections whose purpose is to list examinations, so bare exam names stay.
+_EXAM_LIST_SECTIONS = {"procedures", "imaging.breast"}
+_DISPLAY_DATE = re.compile(r"\b\d{1,2} [A-Z][a-z]{2} \d{4}\b")
+
+
+def _bare_exam(item: dict) -> bool:
+    """An examination named without any finding ('Long-term ECG')."""
+    return (item.get("category", "").startswith("procedure.")
+            and "," not in item["text"] and not re.search(r"\d", item["text"]))
+
+
+def _measure_kind(item: dict) -> str | None:
+    """'heart rate' for 'Heart rate 83/min'; None if not a measured value."""
+    if not item.get("category", "").startswith("measurement."):
+        return None
+    text = _DISPLAY_DATE.sub("", item["text"])
+    match = re.search(r"\d", text)
+    if not match:
+        return None
+    kind = _normalised_item_text(text[:match.start()])
+    return kind or None
+
+
+def _focus_sections(sections: list[dict], role: str) -> None:
+    """Show what this role needs, once, without a hidden 'more' list.
+
+    * bare examination names are dropped where findings are listed;
+    * a repeated measurement keeps only its most recent value (different
+      values on that same date are all kept — they may be a contradiction);
+    * the diagnosis list keeps only its most relevant entries for specialist
+      roles; general roles, and every other section, show everything.
+    """
+    for section in sections:
+        items = section.get("items", [])
+        # Only the long diagnosis list is cut to the most relevant entries
+        # for specialist roles; every other section is shown in full.
+        if section["key"] != "dx.active" or role in GENERAL_ROLES:
+            items = items + section.get("more", [])
+        if section["key"] in _EXAM_LIST_SECTIONS:
+            named = [item["text"] for item in items if not _bare_exam(item)]
+            items = [item for item in items if not _bare_exam(item)
+                     or not any(text.startswith(item["text"] + ",")
+                                for text in named)]
+        else:
+            items = [item for item in items if not _bare_exam(item)] or items
+        newest: dict[str, str] = {}
+        for item in items:
+            kind = _measure_kind(item)
+            if kind:
+                newest[kind] = max(newest.get(kind, ""), item.get("iso_date") or "")
+        section["items"] = [
+            item for item in items
+            if not _measure_kind(item)
+            or (item.get("iso_date") or "") == newest[_measure_kind(item)]]
+        section["more"] = []
+
+
+
+def _measure_key(text: str) -> tuple[str, str] | None:
+    """('marker x rate', '45') for 'Marker X rate 45%'."""
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", text)
+    if not match:
+        return None
+    label = re.sub(r"\b(positive|negative|positiv|negativ)\b|\(", " ",
+                   text[:match.start()].casefold())
+    label = _normalised_item_text(label)
+    return (label, match.group(1).replace(",", ".")) if label else None
+
+
+def _keep_conflicting_values_visible(sections: list[dict]) -> None:
+    """Never hide one value of a measurement behind 'more' while another,
+    different value of the same measurement is shown."""
+    for section in sections:
+        visible = {}
+        for item in section.get("items", []):
+            key = _measure_key(item["text"])
+            if key:
+                visible.setdefault(key[0], set()).add(key[1])
+        kept = []
+        for item in section.get("more", []):
+            key = _measure_key(item["text"])
+            if key and key[0] in visible and key[1] not in visible[key[0]]:
+                section["items"].append(item)
+            else:
+                kept.append(item)
+        if "more" in section:
+            section["more"] = kept
 
 
 # ------------------------------------------------------------- public entry
+
+def _section_items(sec: Section, data: PatientData, facts: list[Fact],
+                   docs: dict, used_fact_keys: set | None = None) -> list[dict]:
+    """Items of one section, built from the documents (no screen logic)."""
+    items = []
+    if sec.kind == "computed":
+        items = BUILDERS[sec.builder](data, facts, docs)
+    elif sec.kind == "search":
+        spans = _search_docs(data, sec.search_terms)
+        for s in spans[:12]:
+            raw = docs[s.doc_id].quote(s)
+            label = None
+            for pat, lab in sec.search_labels:
+                if re.search(pat, raw, re.IGNORECASE):
+                    label = lab
+                    break
+            if label is None:
+                label = f"{sec.title} finding"
+            item = {"text": label, "date": docs[s.doc_id].date,
+                    "derived": False, "not_documented": False,
+                    "original": raw,
+                    "sources": _srcs(docs, [s])}
+            items.append(item)
+    else:
+        fs = _facts_of(facts, sec.categories, sec.exclude, sec.kw_filter)
+        if sec.kind == "latest":
+            fs = _latest_per_key(fs)
+        elif sec.kind == "timeline":
+            fs = sorted(fs, key=lambda f: (f.date or "", f.text), reverse=True)
+        else:
+            fs = sorted(fs, key=lambda f: (f.category, f.text))
+        for f in fs:
+            if used_fact_keys is not None:
+                used_fact_keys.add(f.key)
+            items.append({**fact_item(f, docs), "not_documented": False})
+    if not items and sec.not_documented:
+        items = [{"text": sec.not_documented, "date": None, "derived": False,
+                  "not_documented": True, "sources": []}]
+    for it in items:
+        it.setdefault("not_documented", False)
+        it.setdefault("sources", [])
+        it.setdefault("derived", False)
+        it.setdefault("date", None)
+    return items
+
 
 def build_screen(situation: str, data: PatientData, facts: list[Fact]) -> dict:
     role = detect_role(situation)
@@ -621,50 +779,14 @@ def build_screen(situation: str, data: PatientData, facts: list[Fact]) -> dict:
     out_sections = []
     used_fact_keys = set()
     for sec in sections:
-        items = []
-        if sec.kind == "computed":
-            items = BUILDERS[sec.builder](data, facts, docs)
-        elif sec.kind == "search":
-            spans = _search_docs(data, sec.search_terms)
-            for s in spans[:12]:
-                raw = docs[s.doc_id].quote(s)
-                label = None
-                for pat, lab in sec.search_labels:
-                    if re.search(pat, raw, re.IGNORECASE):
-                        label = lab
-                        break
-                if label is None:
-                    label = f"{sec.title} finding"
-                item = {"text": label, "date": docs[s.doc_id].date,
-                        "derived": False, "not_documented": False,
-                        "original": raw,
-                        "sources": _srcs(docs, [s])}
-                items.append(item)
-        else:
-            fs = _facts_of(facts, sec.categories, sec.exclude, sec.kw_filter)
-            if sec.kind == "latest":
-                fs = _latest_per_key(fs)
-            elif sec.kind == "timeline":
-                fs = sorted(fs, key=lambda f: (f.date or "", f.text), reverse=True)
-            else:
-                fs = sorted(fs, key=lambda f: (f.category, f.text))
-            for f in fs:
-                used_fact_keys.add(f.key)
-                items.append({**fact_item(f, docs), "not_documented": False})
-        if not items and sec.not_documented:
-            items = [{"text": sec.not_documented, "date": None, "derived": False,
-                      "not_documented": True, "sources": []}]
-        for it in items:
-            it.setdefault("not_documented", False)
-            it.setdefault("sources", [])
-            it.setdefault("derived", False)
-            it.setdefault("date", None)
+        items = _section_items(sec, data, facts, docs, used_fact_keys)
         if items:
             out_sections.append({"key": sec.key, "title": sec.title, "items": items})
 
     # Merge repeated labels before limiting overload and filling the fallback.
     shown_texts = _dedupe_screen_items(out_sections)
     _limit_overloaded_sections(out_sections, role, situation)
+    _focus_sections(out_sections, role)
 
     # generic relevance fallback: surface any high-scoring facts not shown yet
     extra = relevance_fallback(situation, facts, used_fact_keys, docs, shown_texts)
@@ -733,3 +855,134 @@ def load_profiles(path: str = "config/profiles.yaml") -> None:
         TASK_EXTRA.update({k: list(v) for k, v in cfg["task_extra"].items()})
     if cfg.get("role_needs"):
         ROLE_NEEDS.update({k: list(v) for k, v in cfg["role_needs"].items()})
+
+
+# ------------------------------------------------------- key questions
+#
+# The three questions a role (optionally narrowed by task words) needs
+# answered first. These are templates for *kinds* of facts per role/task —
+# the answers are always looked up in the documents. Entries are tried in
+# order; the first whose roles and task pattern match wins.
+#
+# question: shown above the answer
+# sections: NEED_DEFS keys whose items may answer it
+# match:    optional regex an item's text must contain
+# latest:   keep only the most recent value of each measurement
+
+KEY_QUESTIONS: list[dict] = [
+    {"roles": ["anaesthetist"], "questions": [
+        {"question": "Which antithrombotic drug (blood thinner) does she take "
+                     "and at what dose?", "sections": ["meds.antithrombotic"]},
+        {"question": "Which allergy is documented?", "sections": ["allergy"]},
+        {"question": "What was the last documented left-ventricular ejection "
+                     "fraction?", "sections": ["cardiac"],
+         "match": r"ejection fraction", "latest": True},
+    ]},
+    {"roles": ["surgeon", "oncologist", "gynaecologist", "pathologist"],
+     "questions": [
+        {"question": "What is the histology (tissue type) and the TNM stage "
+                     "(tumour size, lymph nodes, spread)?",
+         "sections": ["dx.oncology"], "match": r"histolog|carcinoma|\bTNM\b"},
+        {"question": "What is the receptor status and the Ki-67 rate?",
+         "sections": ["dx.oncology"], "match": r"receptor|HER2|Ki-67"},
+        {"question": "What did the tumour board recommend and when is it "
+                     "scheduled?", "sections": ["plan.treatment"],
+         "match": r"tumour board discussion documented|quadrantectomy|"
+                  r"mastectomy|resection|surgery"},
+    ]},
+    {"roles": ["gp", "internist", "diabetologist", "dietitian", "clinician"],
+     "task": r"diabet|glucose|blood sugar|hba1c",
+     "questions": [
+        {"question": "Which glucose-lowering drugs does she take and at what "
+                     "doses?", "sections": ["meds.antidiabetic"]},
+        {"question": "What is her latest HbA1c and from when?",
+         "sections": ["hba1c"]},
+        {"question": "How did her weight change?", "sections": ["weight"]},
+    ]},
+    {"roles": ["emergency", "neurologist"], "questions": [
+        {"question": "Has this happened before and what was found to be the "
+                     "cause?", "sections": ["history"]},
+        {"question": "Is anything documented that matters before giving "
+                     "iodinated contrast?", "sections": ["contrast"]},
+        {"question": "Which antihypertensive (blood pressure drug) does she "
+                     "take and at what dose?",
+         "sections": ["meds.antihypertensive"]},
+    ]},
+    {"roles": ["gp", "internist", "clinician", "ophthalmologist"],
+     "task": r"follow-?up|nachsorge|kontroll|open item|discharge",
+     "questions": [
+        {"question": "Which follow-ups were recommended at discharge?",
+         "sections": ["followup"]},
+        {"question": "Is there a record that the follow-up carotid "
+                     "ultrasound took place?", "sections": ["followup"],
+         "match": r"carotid|duplex"},
+        {"question": "On which side is the carotid stenosis?",
+         "sections": ["dx.vascular"], "match": r"carotid"},
+    ]},
+    {"roles": ["pharmacist"], "questions": [
+        {"question": "Which medicines does she take and at what doses?",
+         "sections": ["meds.current"]},
+        {"question": "Which allergy is documented?", "sections": ["allergy"]},
+        {"question": "Is her renal function documented?", "sections": ["renal"]},
+    ]},
+    {"roles": ["cardiologist"], "questions": [
+        {"question": "What was the last documented left-ventricular ejection "
+                     "fraction?", "sections": ["cardiac"],
+         "match": r"ejection fraction", "latest": True},
+        {"question": "What vascular findings are documented?",
+         "sections": ["dx.vascular"]},
+        {"question": "Which antihypertensive does she take and at what dose?",
+         "sections": ["meds.antihypertensive"]},
+    ]},
+    {"roles": ["nurse"], "questions": [
+        {"question": "Which allergy is documented?", "sections": ["allergy"]},
+        {"question": "Which medicines does she take and at what doses?",
+         "sections": ["meds.current"]},
+        {"question": "Which procedure is planned and when?",
+         "sections": ["plan.treatment"], "match": r"planned|quadrantectomy"},
+    ]},
+    # any other role or task
+    {"roles": [], "questions": [
+        {"question": "Which allergy is documented?", "sections": ["allergy"]},
+        {"question": "Which medicines does she take and at what doses?",
+         "sections": ["meds.current"]},
+        {"question": "Which diagnoses are documented?", "sections": ["dx.active"]},
+    ]},
+]
+
+
+def select_key_questions(role: str, situation: str) -> list[dict]:
+    low = situation.casefold()
+    for entry in KEY_QUESTIONS:
+        if entry["roles"] and role not in entry["roles"]:
+            continue
+        if entry.get("task") and not re.search(entry["task"], low):
+            continue
+        return entry["questions"]
+    return KEY_QUESTIONS[-1]["questions"]
+
+
+def build_key_questions(situation: str, data: PatientData,
+                        facts: list[Fact]) -> list[dict]:
+    """Answer the role's three key questions from document facts."""
+    role = detect_role(situation)
+    docs = data.documents
+    answers = []
+    for spec in select_key_questions(role, situation):
+        items: list[dict] = []
+        for key in spec["sections"]:
+            for item in _section_items(NEED_DEFS[key], data, facts, docs):
+                if spec.get("match") and not item.get("not_documented") and \
+                        not re.search(spec["match"], item["text"], re.IGNORECASE):
+                    continue
+                items.append(item)
+        box = [{"key": "answer", "items": items, "more": []}]
+        _dedupe_screen_items(box)
+        if spec.get("latest"):
+            _focus_sections(box, role)
+        items = box[0]["items"]
+        if not items:
+            items = [{"text": "Not documented", "date": None, "derived": False,
+                      "not_documented": True, "sources": []}]
+        answers.append({"question": spec["question"], "items": items})
+    return answers

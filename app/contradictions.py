@@ -125,6 +125,15 @@ def check_conflicting_dates(data: PatientData) -> list[Contradiction]:
     return out
 
 
+_OUTPATIENT = re.compile(r"\bambulan\w*", re.IGNORECASE)
+
+
+def _encounter_kind(doc: Document) -> str:
+    return ("outpatient"
+            if _OUTPATIENT.search(doc.title) or _OUTPATIENT.search(doc.text[:600])
+            else "inpatient")
+
+
 def check_case_ids(data: PatientData) -> list[Contradiction]:
     """Documents of the same hospital stay carrying different case numbers.
 
@@ -136,8 +145,9 @@ def check_case_ids(data: PatientData) -> list[Contradiction]:
         for m in re.finditer(r"fall\s*:\s*(\d{6,})", doc.text, re.IGNORECASE):
             label = f"{doc_type_label(doc.title)}, {doc.date[:7]}"
             claims.append((m.group(1), doc.span(m.start(), m.end()), label,
-                           doc.date[:7]))
-    # group by the month of the stay a doc reports on (doc date month)
+                           f"{doc.date[:7]}:{_encounter_kind(doc)}"))
+    # Group by stay: same month and same kind of encounter. An outpatient
+    # visit is its own case, so a different number there is expected.
     by_month: dict[str, list] = {}
     for c in claims:
         by_month.setdefault(c[3], []).append(c)
@@ -146,7 +156,7 @@ def check_case_ids(data: PatientData) -> list[Contradiction]:
         if len({g[0] for g in group}) >= 2:
             desc = " vs ".join(f"'{g[0]}' ({g[2]})" for g in group)
             out += _contra(
-                f"admin.case_id.{month}",
+                f"admin.case_id.{month.split(':')[0]}",
                 "Conflicting case numbers for the same hospital stay",
                 f"Documents of the same stay are filed under different case numbers: {desc}.",
                 "identity",
@@ -213,8 +223,50 @@ def check_negation_conflicts(data: PatientData) -> list[Contradiction]:
         pos + neg)
 
 
+# Tumour markers are measured once on a biopsy specimen, so within one stay
+# every passage must report the same value. Values that change over time
+# (weight, blood pressure, EF) are deliberately not compared here.
+_MARKERS = [
+    ("ki67", "Ki-67 proliferation rate", r"ki-?67[^\d\n]{0,30}(\d+(?:[.,]\d+)?)\s*%"),
+    ("er", "Oestrogen receptor", r"[öo]e?strogenrezeptor[^\d\n]{0,40}?(\d+)\s*%"),
+    ("pr", "Progesterone receptor", r"progesteronrezeptor[^\d\n]{0,40}?(\d+)\s*%"),
+    ("her2", "HER2 status", r"her-?2\w*[^.\n]{0,25}?\b(positiv|negativ)\b"),
+]
+
+
+def check_marker_values(data: PatientData) -> list[Contradiction]:
+    """The same tumour marker reported with different values in one stay."""
+    out: list[Contradiction] = []
+    for key, label, pattern in _MARKERS:
+        by_month: dict[str, list[tuple[str, EvidenceSpan, str]]] = {}
+        for doc in data.documents.values():
+            for m in re.finditer(pattern, doc.text, re.IGNORECASE):
+                value = m.group(1).casefold().replace(",", ".")
+                by_month.setdefault(doc.date[:7], []).append(
+                    (value, doc.span(m.start(), m.end()),
+                     f"{doc_type_label(doc.title)}, {doc.date}"))
+        for month, claims in by_month.items():
+            values = sorted({claim[0] for claim in claims})
+            if len(values) < 2:
+                continue
+            unit = "" if key == "her2" else "%"
+            shown = " vs ".join(
+                f"{value}{unit} ("
+                + "; ".join(dict.fromkeys(c[2] for c in claims if c[0] == value))
+                + ")"
+                for value in values)
+            out += _contra(
+                f"marker.{key}.{month}",
+                f"{label}: different values for the same biopsy",
+                f"Passages from the same stay report different values: {shown}.",
+                "numeric",
+                [claim[1] for claim in claims])
+    return out
+
+
 def detect_contradictions(data: PatientData) -> list[Contradiction]:
     out: list[Contradiction] = []
+    out += check_marker_values(data)
     out += check_laterality(data)
     out += check_bmi(data)
     out += check_conflicting_dates(data)

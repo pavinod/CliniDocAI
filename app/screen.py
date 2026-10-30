@@ -24,8 +24,8 @@ from .model import (DeterministicAdapter, ModelError, get_adapter,
                     support_mismatch_reason)
 from .pipeline import Document, PatientData, load_patient
 from .schemas import (
-    Contradiction, EvidenceSpan, Fact, MissingItem, Screen, ScreenItem,
-    ScreenSection, sha256_text,
+    Contradiction, EvidenceSpan, Fact, KeyQuestion, MissingItem, Screen,
+    ScreenItem, ScreenSection, sha256_text,
     EXTRACTION_VERSION, MODEL_VERSION, PROMPT_VERSION,
 )
 
@@ -435,18 +435,18 @@ def review_status_for(adapter=None) -> str:
             adapter = get_adapter()
         except ModelError:
             pass
-    if isinstance(adapter, DeterministicAdapter):
+    if adapter is None or isinstance(adapter, DeterministicAdapter):
         return "Rule-based extraction (no AI model) — pending clinician review"
-    provider = os.environ.get(
-        "MODEL_PROVIDER", os.environ.get("CLINIDOC_MODEL", "none"))
-    if provider not in {"openai", "lmstudio", "http"}:
-        return "Rule-based extraction (no AI model) — pending clinician review"
-    return f"AI-assisted draft ({provider}) — pending clinician review"
+    model_name = getattr(adapter, "model_name", None) or getattr(
+        adapter, "name", "model")
+    return (f"Rule-based extraction, claims checked by {model_name} "
+            "— pending clinician review")
 
 
 def build_screen_model(situation: str,
                        data_dir: Path | None = None,
-                       drop_log: list[dict[str, str]] | None = None
+                       drop_log: list[dict[str, str]] | None = None,
+                       adapter=None,
                        ) -> tuple[Screen, dict]:
     """Full pipeline for one situation. Returns (Screen, debug_stats)."""
     errors: list[str] = []
@@ -460,12 +460,17 @@ def build_screen_model(situation: str,
 
     role, task, ref = parse_situation(situation)
     raw = needs.build_screen(situation, data, facts)
+    # The key questions are checked and merged exactly like screen sections.
+    question_boxes = [
+        {"key": f"question.{index}", "question": answer["question"],
+         "items": answer["items"], "more": []}
+        for index, answer in enumerate(
+            needs.build_key_questions(situation, data, facts))]
 
     dropped = 0
-    adapter = None
     try:
-        adapter = get_adapter()
-        for sec in raw["sections"]:
+        adapter = adapter or get_adapter()
+        for sec in [*question_boxes, *raw["sections"]]:
             sec["items"], n = _check_support(
                 sec["items"], data, adapter, drop_log)
             dropped += n
@@ -475,9 +480,21 @@ def build_screen_model(situation: str,
     except ModelError as e:
         errors.append(f"claim-support assessment unavailable: {e}")
         dropped = 0
+        adapter = None
 
     _merge_history_event_items(raw["sections"])
+    _merge_history_event_items(question_boxes)
     _promote_empty_sections(raw["sections"])
+
+    key_questions = [
+        KeyQuestion(
+            question=box["question"],
+            items=[_screen_item(i) for i in box["items"]] or [ScreenItem(
+                text="Not documented", not_documented=True)],
+            contradiction_keys=related_contradictions(
+                box["question"], box["items"], contradictions))
+        for box in question_boxes
+    ]
 
     sections = [
         ScreenSection(key=s["key"], title=s["title"],
@@ -506,6 +523,7 @@ def build_screen_model(situation: str,
         role=role,
         task_text=task,
         reference_date=ref,
+        key_questions=key_questions,
         sections=sections,
         contradictions=contradictions,
         missing=_missing_items(raw["sections"]),
@@ -517,6 +535,52 @@ def build_screen_model(situation: str,
              "unsupported_dropped": dropped,
              "unsupported_spans_dropped": dropped}
     return screen, stats
+
+
+def _screen_item(i: dict) -> ScreenItem:
+    return ScreenItem(
+        text=i["text"], original=i.get("original"), date=i.get("date"),
+        derived=i.get("derived", False),
+        not_documented=i.get("not_documented", False),
+        status=i.get("status"), support=i.get("support"),
+        formula=i.get("formula"), sources=i.get("sources", []))
+
+
+# Words in contradiction titles that say *how* things conflict, not *what*.
+_CONFLICT_WORDS = {
+    "conflicting", "different", "values", "dates", "numbers", "number",
+    "documents", "document", "match", "letter", "discharge", "outpatient",
+    "hospital", "within", "between", "documented", "report", "reports",
+}
+
+
+def _topic_words(text: str) -> set[str]:
+    return {word for word in re.findall(r"[a-z][a-z0-9-]{4,}", text.casefold())
+            if word not in _CONFLICT_WORDS}
+
+
+def related_contradictions(question: str, items: list[dict],
+                           contradictions: list[Contradiction]) -> list[str]:
+    """Contradictions that concern this answer.
+
+    A contradiction belongs to an answer when one of its passages overlaps a
+    passage the answer cites, or when its topic (the title before any ':')
+    names something the question or answer is about.
+    """
+    cited = [(src.get("doc"), src.get("start"), src.get("end"))
+             for item in items for src in item.get("sources", [])]
+    about = _topic_words(" ".join(
+        [question, *(item["text"] for item in items)]))
+    related = []
+    for contradiction in contradictions:
+        overlaps = any(
+            span.doc_id == doc and isinstance(start, int) and isinstance(end, int)
+            and span.start < end and start < span.end
+            for span in contradiction.evidence for doc, start, end in cited)
+        topic = contradiction.title.split(":", 1)[0].split("(", 1)[0]
+        if overlaps or _topic_words(topic) & about:
+            related.append(contradiction.key)
+    return related
 
 
 def _versions() -> dict:

@@ -100,10 +100,18 @@ class TaskProfile(BaseModel):
     reference_date: str                    # "as of" date for the screen
 
 
+class KeyQuestion(BaseModel):
+    """One of the role's three key questions, answered from the documents."""
+    question: str
+    items: list[ScreenItem] = Field(default_factory=list)
+    contradiction_keys: list[str] = Field(default_factory=list)
+
+
 class Screen(BaseModel):
     role: str
     task_text: str
     reference_date: str
+    key_questions: list[KeyQuestion] = Field(default_factory=list)
     sections: list[ScreenSection] = Field(default_factory=list)
     contradictions: list[Contradiction] = Field(default_factory=list)
     missing: list[MissingItem] = Field(default_factory=list)

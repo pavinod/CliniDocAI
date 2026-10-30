@@ -150,11 +150,15 @@ def main(data_root: str = "data/patient-0000-0001") -> None:
     print("=" * 70)
 
     # Load expected answers (evaluation pipeline only)
-    expected_path = ROOT / "cases" / "expected.json"
-    expected: list[dict] = []
-    if expected_path.exists():
-        with open(expected_path, encoding="utf-8") as fh:
-            expected = json.load(fh)
+    expected_path = next(
+        (path for path in (ROOT / "eval" / "expected.json",
+                           ROOT / "cases" / "expected.json")
+         if path.exists()), None)
+    if expected_path is None:
+        sys.exit("expected.json not found: copy the supplied cases/expected.json "
+                 "into eval/ (it is git-ignored) and run again.")
+    with open(expected_path, encoding="utf-8") as fh:
+        expected: list[dict] = json.load(fh)
 
     total_questions  = 0
     correct_answers  = 0

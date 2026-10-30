@@ -92,8 +92,61 @@ DE: dict[str, str] = {
         "wegen der Allergie ohne Kontrastmittel durchgeführt",
     "{n} more": "{n} weitere",
     "original": "Original",
-    "Export PDF": "PDF exportieren",
-    "Download PDF": "PDF herunterladen",
+    "Key questions for this role": "Kernfragen für diese Rolle",
+    "Q": "F",
+    "All facts for this role": "Alle Fakten für diese Rolle",
+    "The full documented data behind the answers above.":
+        "Die vollständigen dokumentierten Daten hinter den Antworten oben.",
+    "Other contradictions in the documents": "Weitere Widersprüche in den Dokumenten",
+    "Clinical summary": "Klinische Zusammenfassung",
+    "Patient": "Patientin",
+    "Printed": "Gedruckt",
+    "Section": "Abschnitt",
+    "Fact": "Fakt",
+    "Date": "Datum",
+    "Generated from the supplied documents only. Draft pending clinician "
+    "review — not for clinical use.":
+        "Ausschließlich aus den vorliegenden Dokumenten erstellt. Entwurf, "
+        "ärztliche Prüfung ausstehend — nicht für den klinischen Einsatz.",
+    "🖨 Print": "🖨 Drucken",
+    "Print this screen with sources and review status":
+        "Diese Ansicht mit Quellen und Prüfstatus drucken",
+    "⬇ Export JSON": "⬇ JSON exportieren",
+    "All displayed facts with full source passages, for validation":
+        "Alle angezeigten Fakten mit vollständigen Quellstellen, zur Prüfung",
+    "JSON output (for validation)": "JSON-Ausgabe (zur Prüfung)",
+    "Smaller text": "Kleinere Schrift",
+    "Larger text": "Größere Schrift",
+    "AI model (claim check)": "KI-Modell (Aussageprüfung)",
+    "Model help":
+        "Regelbasiert ist der Standard. Ein KI-Modell prüft zusätzlich, ob "
+        "jede zitierte Textstelle die Aussage stützt.",
+    "Rule-based only (no AI model)": "Nur regelbasiert (kein KI-Modell)",
+    "LM Studio (local model)": "LM Studio (lokales Modell)",
+    "Cloud models receive the cited passages. Only use them with synthetic data.":
+        "Cloud-Modelle erhalten die zitierten Textstellen. Nur mit "
+        "synthetischen Daten verwenden.",
+    "AI model not used ({problem}) — showing rule-based results.":
+        "KI-Modell nicht verwendet ({problem}) — regelbasierte Ergebnisse "
+        "werden angezeigt.",
+    "Layout": "Layout",
+    "Save layout": "Layout speichern",
+    "Reset layout": "Layout zurücksetzen",
+    "Layout saved at {time}": "Layout gespeichert um {time}",
+    "Allergies always stay at the top.": "Allergien bleiben immer oben.",
+    "Layout preferences file: {path}": "Datei mit Layout-Einstellungen: {path}",
+    "Inputs changed — press Show patient facts to update the screen.":
+        "Eingaben geändert — „Patientenfakten anzeigen“ drücken, um die "
+        "Ansicht zu aktualisieren.",
+    "🎙 Start live voice input": "🎙 Live-Spracheingabe starten",
+    "Listening… {n} s": "Aufnahme läuft… {n} s",
+    "Live transcript": "Live-Transkript",
+    "⏹ Stop and use as task": "⏹ Stoppen und als Aufgabe übernehmen",
+    "Female": "Weiblich",
+    "Male": "Männlich",
+    "Move section up": "Abschnitt nach oben",
+    "Move section down": "Abschnitt nach unten",
+    "Download JSON": "JSON herunterladen",
     "Language": "Sprache",
     "years": "Jahre",
     "born": "geb.",
@@ -229,33 +282,35 @@ DE: dict[str, str] = {
     "Dentist": "Zahnarzt",
     "Clinician": "Kliniker",
     # ---------------------------------------------------------- examples
-    "Anaesthetist · pre-op review": "Anästhesist · präoperative Prüfung",
     "Review relevant findings and risks before the scheduled operation.":
         "Relevante Befunde und Risiken vor der geplanten Operation prüfen.",
-    "Surgeon · tumour-board plan": "Chirurg · Tumorboard-Planung",
     "Review the available findings and proposed plan for the scheduled "
     "operation.":
         "Verfügbare Befunde und den vorgeschlagenen Plan für die geplante "
         "Operation prüfen.",
-    "GP · diabetes review": "Hausarzt · Diabetes-Kontrolle",
     "Review recent treatment, measurements, and follow-up needs.":
         "Aktuelle Behandlung, Messwerte und Nachsorgebedarf prüfen.",
-    "Emergency physician · night presentation":
-        "Notarzt · nächtliche Vorstellung",
     "Review prior episodes and relevant findings for the current urgent "
     "presentation.":
         "Frühere Episoden und relevante Befunde für die aktuelle akute "
         "Vorstellung prüfen.",
-    "GP · open follow-ups": "Hausarzt · offene Nachsorge",
     "Review open follow-up items from the previous hospital stay.":
         "Offene Nachsorgepunkte aus dem früheren Klinikaufenthalt prüfen.",
-    "Pharmacist · medication reconciliation": "Apotheker · Medikationsabgleich",
+    "Pre-operative anaesthesia check": "Präoperative Anästhesie-Prüfung",
+    "Surgery planning after the tumour board, April 2016":
+        "Operationsplanung nach dem Tumorboard, April 2016",
+    "Diabetes review at the GP": "Diabetes-Kontrolle beim Hausarzt",
+    "Emergency department at night": "Notaufnahme in der Nacht",
+    "Open follow-ups from the 2015 hospital stay":
+        "Offene Nachsorge aus dem Krankenhausaufenthalt 2015",
+    "Task description": "Aufgabenbeschreibung",
+    "Choose a task…": "Aufgabe wählen…",
+    "Medication reconciliation": "Medikationsabgleich",
     "Check the documented medicines and identify reconciliation issues "
     "before the operation.":
         "Die dokumentierten Medikamente prüfen und Abgleichprobleme vor der "
         "Operation identifizieren.",
-    "Cardiologist · pre-op cardiovascular review":
-        "Kardiologe · präoperative kardiovaskuläre Beurteilung",
+    "Pre-op cardiovascular review": "Präoperative kardiovaskuläre Beurteilung",
     "Review available findings and relevant risks before the planned "
     "operation.":
         "Verfügbare Befunde und relevante Risiken vor der geplanten "

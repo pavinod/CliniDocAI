@@ -128,3 +128,80 @@ def test_contradictions(store):
 
 def test_load_time(store):
     assert store[3] < 10.0, f"pipeline took {store[3]:.1f}s"
+
+
+def test_screens_are_focused(screens):
+    """Role focus must not cost answers (checked above) and must not leave
+    hidden overflow or repeated older values of one measurement."""
+    from app.needs import _measure_kind
+    for name, screen in screens.items():
+        for section in screen["sections"]:
+            assert not section.get("more"), f"{name}: hidden items in {section['key']}"
+            kinds = [_measure_kind(it) for it in section["items"]]
+            dated = {}
+            for item, kind in zip(section["items"], kinds):
+                if kind:
+                    dated.setdefault(kind, set()).add(item.get("iso_date"))
+            repeated = {k: d for k, d in dated.items() if len(d) > 1}
+            assert not repeated, f"{name}/{section['key']}: {repeated}"
+
+
+@pytest.mark.parametrize("exp", EXPECTED, ids=[e["id"] for e in EXPECTED])
+def test_answer_is_in_its_key_question_box(exp, store):
+    """Offline check: question n of each situation is answered in box n.
+    expected.json is only read here, never by the app."""
+    from app.needs import build_key_questions
+    data, facts, _, _ = store
+    boxes = build_key_questions(SITUATIONS[exp["situation"]], data, facts)
+    box = boxes[int(exp["id"].split(".")[1]) - 1]
+    # the screen shows a "not documented" badge for flagged items
+    text = "\n".join(
+        " ".join(p for p in (it["text"], it.get("original"),
+                             "not documented" if it.get("not_documented") else "")
+                 if p)
+        for it in box["items"]).lower()
+    docs = {s["doc"] for it in box["items"] for s in it.get("sources", [])}
+    need_frag, need_docs = REQUIRED[exp["id"]]
+    missing = [f for f in need_frag if f.lower() not in text]
+    assert not missing, f"{exp['id']} box '{box['question']}': missing {missing}"
+    missing_docs = [d for d in need_docs if d not in docs]
+    assert not missing_docs, f"{exp['id']}: sources missing {missing_docs}"
+
+
+def _examples():
+    import yaml
+    config = yaml.safe_load((Path(__file__).resolve().parent.parent
+                             / "config" / "profiles.yaml").read_text())
+    return {example["label"]: example for example in config["examples"]}
+
+
+def test_every_situation_has_an_example_with_the_right_role():
+    """The task picker offers each situation of the brief with its role."""
+    examples = _examples()
+    roles = {"Pre-operative anaesthesia check": "anaesthetist",
+             "Surgery planning after the tumour board, April 2016": "surgeon",
+             "Diabetes review at the GP": "gp",
+             "Emergency department at night": "emergency",
+             "Open follow-ups from the 2015 hospital stay": "gp"}
+    for title, role in roles.items():
+        assert title in examples, title
+        assert examples[title]["role"] == role, title
+
+
+@pytest.mark.parametrize("exp", EXPECTED, ids=[e["id"] for e in EXPECTED])
+def test_picking_the_example_answers_its_question(exp, store):
+    """Choosing a situation from the task picker fills the role and task the
+    way app.py does; box n must answer the situation's question n."""
+    from app.needs import build_key_questions, detect_role
+    data, facts, _, _ = store
+    example = _examples()[exp["situation"]]
+    situation = f"You are the {example['role']}. {example['task']} as of 2016-04-15."
+    assert detect_role(situation) == example["role"]
+    box = build_key_questions(situation, data, facts)[int(exp["id"].split(".")[1]) - 1]
+    text = "\n".join(
+        " ".join(p for p in (it["text"], it.get("original"),
+                             "not documented" if it.get("not_documented") else "")
+                 if p)
+        for it in box["items"]).lower()
+    missing = [f for f in REQUIRED[exp["id"]][0] if f.lower() not in text]
+    assert not missing, f"{exp['id']} '{box['question']}': missing {missing}"

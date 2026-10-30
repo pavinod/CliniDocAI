@@ -208,6 +208,21 @@ class MicRecorder:
                 "Check that a microphone is connected and not muted."
             )
 
+        return self._encode(frames)
+
+    def snapshot(self) -> Optional[bytes]:
+        """WAV bytes of everything recorded so far, without stopping.
+
+        Used for live (incremental) transcription while still recording.
+        Returns None when nothing has been captured yet.
+        """
+        with self._lock:
+            frames = list(self._frames)
+        if not frames:
+            return None
+        return self._encode(frames)
+
+    def _encode(self, frames) -> bytes:
         import soundfile as sf  # type: ignore
 
         audio = np.concatenate(frames, axis=0)

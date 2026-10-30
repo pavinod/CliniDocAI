@@ -88,6 +88,7 @@ def fact_item(f: Fact, docs: dict[str, Document]) -> dict:
         "text": f.text,
         "original": f.original,
         "date": en_date(f.date),
+        "iso_date": f.date,
         "event_date": (f.date if f.category == "history.event" else None),
         "event_month": (
             f.date[:7] if f.category == "history.event" and f.date else None),
@@ -322,6 +323,17 @@ def _dates_in(text: str) -> list[tuple[int, int, str]]:
         if parsed:
             dates.append((match.start(), match.end(), parsed))
     return dates
+
+
+_BIRTH_CONTEXT = re.compile(r"\bgeb(?:\.|oren|urtsdatum)?\s*(?:am\s*)?:?\s*$",
+                            re.IGNORECASE)
+
+
+def _event_dates_in(text: str) -> list[tuple[int, int, str]]:
+    """Dates in ``text`` that can date an event — never a birth date
+    ("geb. 01.01.1970"), which often shares a sentence with the event."""
+    return [entry for entry in _dates_in(text)
+            if not _BIRTH_CONTEXT.search(text[max(0, entry[0] - 20):entry[0]])]
 
 
 def _display_date(value: str | None) -> str | None:
@@ -780,6 +792,24 @@ def _med_row_text(drug: str, row: str) -> str:
     return text
 
 
+_DOSE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:mg|µg|mcg|g|ml|IE|IU)\b", re.IGNORECASE)
+_SCHEDULE = re.compile(
+    r"\d+(?:/\d+)?\s*-\s*\d+(?:/\d+)?\s*-\s*\d+(?:/\d+)?(?:\s*-\s*\d+(?:/\d+)?)?")
+
+
+def _regimen_note(earlier: str, latest: str) -> str:
+    """Describe an earlier regimen: dose and schedule, whichever differ."""
+    parts = []
+    dose, latest_dose = _DOSE.search(earlier), _DOSE.search(latest)
+    if dose and (not latest_dose
+                 or dose.group(0).replace(" ", "") != latest_dose.group(0).replace(" ", "")):
+        parts.append(dose.group(0))
+    schedule = _SCHEDULE.search(earlier)
+    if schedule:
+        parts.append(schedule.group(0).replace(" ", ""))
+    return " ".join(parts) if parts else earlier
+
+
 def extract_medication(data: PatientData) -> list[Fact]:
     """Medication-table rows plus in-text drug mentions; deduped by drug.
 
@@ -844,12 +874,12 @@ def extract_medication(data: PatientData) -> list[Fact]:
         latest = dates[-1]
         text = rec["dates"][latest][0][0]
         spans = [sp for d in dates for _, sp in rec["dates"][d]]
-        earlier = [t for d in dates[:-1] for t, _ in rec["dates"][d] if t != text]
+        earlier = [(d, t) for d in dates[:-1] for t, _ in rec["dates"][d]
+                   if t != text]
         if earlier:
-            sig = re.search(r"\d+(?:/\d+)?\s*-\s*\d+(?:/\d+)?\s*-\s*\d+(?:/\d+)?(?:\s*-\s*\d+(?:/\d+)?)?",
-                            earlier[-1])
-            note = sig.group(0).replace(" ", "") if sig else earlier[-1]
-            text += f" (in the {en_month(dates[0])} letter: {note})"
+            earlier_date, earlier_text = earlier[-1]
+            text += (f" (in the {en_month(earlier_date)} letter: "
+                     f"{_regimen_note(earlier_text, text)})")
         if drug in mentions:
             spans += mentions[drug]["spans"]
         facts.append(Fact(
@@ -1114,7 +1144,7 @@ def extract_procedures(data: PatientData) -> list[Fact]:
                           doc, match.start(), match.end()))
                 key = f"{cat}.{pat[:18]}.{doc.doc_id}"
                 quote = doc.quote(sp)
-                dates = _dates_in(quote)
+                dates = _event_dates_in(quote)
                 fact_date = dates[0][2] if dates else doc.date
                 evidence = [sp]
                 original = quote
@@ -1153,6 +1183,11 @@ def extract_procedures(data: PatientData) -> list[Fact]:
     return list(seen.values())
 
 
+_RECOMMENDED = re.compile(r"empfohlen|empfiehlt|empfehlung", re.IGNORECASE)
+_FUTURE = re.compile(r"\bwird\b|\bwerden\b|\bgeplant\b", re.IGNORECASE)
+_PAST = re.compile(r"\bwurde\b|\bwurden\b|\berfolgte\b", re.IGNORECASE)
+
+
 def extract_plans(data: PatientData) -> list[Fact]:
     """Extract recommendations and link planned procedures to later reports."""
     facts = []
@@ -1186,7 +1221,7 @@ def extract_plans(data: PatientData) -> list[Fact]:
         for pat, key, label, kws in rules:
             for sp in _regex_spans(doc, pat)[:2]:
                 quote = doc.quote(sp)
-                dates = _dates_in(quote)
+                dates = _event_dates_in(quote)
                 event_date = dates[0][2] if dates else doc.date
                 category = ".".join(key.split(".")[:2])
                 text = _source_fact_text(label, quote, event_date)
@@ -1194,20 +1229,39 @@ def extract_plans(data: PatientData) -> list[Fact]:
                 status = _plan_status(category, event_date)
                 if category in {"plan.surgery", "admin.admission"}:
                     status = "planned"
+                if (category == "plan.surgery" and not dates
+                        and _RECOMMENDED.search(quote)):
+                    # Undated recommendation: the letter date is when it was
+                    # written down, not when the procedure takes place.
+                    text = (f"{label} — recommended "
+                            f"(documented {_display_date(doc.date)})")
+                    status = "recommended"
                 if category == "plan.done" and "biopsy" in key:
                     performed = _later_procedure_report(
                         data, doc, r"biops\w*|stanz\w*")
                     if performed:
-                        performed_date, performed_span = performed
+                        performed_date, performed_span, dated = performed
                         evidence.append(performed_span)
-                        text += f" — later documented as performed {_display_date(performed_date)}"
+                        if dated:
+                            text += (" — later documented as performed "
+                                     f"{_display_date(performed_date)}")
+                        else:
+                            text += (" — later documented as performed "
+                                     f"(reported {_display_date(performed_date)})")
                         event_date = performed_date
                         status = "completed"
                     else:
                         text += " — planned"
                         status = "planned"
                 if category == "plan.done" and "tumorboard" in key:
-                    status = "completed"
+                    # "wird ... besprochen" = will be discussed; only a
+                    # past-tense statement documents the discussion.
+                    if _FUTURE.search(quote) and not _PAST.search(quote):
+                        status = "planned"
+                        text = text.replace("discussion documented",
+                                            "discussion planned")
+                    else:
+                        status = "completed"
                 facts.append(Fact(
                     key=f"{key}.{doc.doc_id}.{sp.start}", category=category,
                     text=text, date=event_date, status=status,
@@ -1229,7 +1283,13 @@ def extract_plans(data: PatientData) -> list[Fact]:
 
 def _later_procedure_report(
         data: PatientData, source_doc: Document, procedure_pattern: str
-        ) -> tuple[str, EvidenceSpan] | None:
+        ) -> tuple[str, EvidenceSpan, bool] | None:
+    """Find a later document reporting the procedure as done.
+
+    Returns (date, span, dated): ``dated`` is False when only the reporting
+    document's own date is known, so the caller must not present it as the
+    procedure date.
+    """
     completion = re.compile(
         r"erfolgte|durchgeführt|vorgenommen|wurde .* biops",
         re.IGNORECASE,
@@ -1242,13 +1302,19 @@ def _later_procedure_report(
             quote = doc.quote(span)
             if not completion.search(quote):
                 continue
-            dates = _dates_in(doc.text)
-            if dates:
-                date = min(dates, key=lambda entry: abs(entry[0] - match.start()))[2]
-            else:
-                date = doc.date
-            return date, span
+            # The event date is the one heading the passage that reports it
+            # (e.g. "Ultraschalluntersuchung ... vom 12.04.2016: ... Es erfolgte
+            # die Biopsie"). A later date such as the report date of a
+            # following section is never used.
+            preceding = [entry for entry in _dates_in(doc.text)
+                         if span.start - _DATE_LOOKBACK <= entry[0] <= span.start]
+            if preceding:
+                return max(preceding, key=lambda entry: entry[0])[2], span, True
+            return doc.date, span, False
     return None
+
+
+_DATE_LOOKBACK = 400
 
 
 def extract_history(data: PatientData) -> list[Fact]:
